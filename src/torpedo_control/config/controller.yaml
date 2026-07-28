@@ -1,0 +1,68 @@
+torpedo_manual_control:
+  ros__parameters:
+    # ROS 2 topics consumed by config/bridge.yaml.
+    thrust_topic: "/torpedo/actuators/thruster/command"
+    fin_top_topic: "/torpedo/actuators/fins/top/command"
+    fin_bottom_topic: "/torpedo/actuators/fins/bottom/command"
+    fin_left_topic: "/torpedo/actuators/fins/left/command"
+    fin_right_topic: "/torpedo/actuators/fins/right/command"
+
+    # Seven-key manual control.
+    nose_push_key: "w"
+    nose_pull_key: "s"
+    yaw_left_key: "a"
+    yaw_right_key: "d"
+    thrust_increase_key: "r"
+    thrust_decrease_key: "f"
+    thrust_stop_key: " "
+
+    # Conservative initial values for manual play.
+    # Fin keys accumulate and hold their target angle. Each key press changes
+    # the corresponding Pitch or Yaw target by fin_command_rad, clamped to
+    # +/-fin_limit_rad. Use the opposite key to return toward neutral.
+    thrust_initial: 0.0
+    thrust_step: 1500.0
+    thrust_min: 0.0
+    thrust_max: 1500.0
+    fin_command_rad: 0.05
+    fin_limit_rad: 0.50
+    publish_rate_hz: 20.0
+
+    # CSV session logging. The CSV header is MATLAB readtable-compatible.
+    log_enabled: true
+    log_directory: "~/.ros/torpedo_control_logs"
+    log_flush_every_n_rows: 1
+
+    # Optional state inputs bridged from Gazebo. Command logging continues
+    # even when either state topic is unavailable.
+    odometry_topic: "/torpedo/state/odometry"
+    joint_states_topic: "/torpedo/state/joint_states"
+    propeller_front_joint_name: "propeller_joint"
+    propeller_rear_joint_name: "propeller_rear_joint"
+    fin_top_joint_name: "fin_top_joint"
+    fin_bottom_joint_name: "fin_bottom_joint"
+    fin_left_joint_name: "fin_left_joint"
+    fin_right_joint_name: "fin_right_joint"
+
+    # These sign values are configuration inputs pending the final physical
+    # sign table. Their current +1 values are defaults, not validation evidence.
+    # R increases the internal positive thrust level. This sign selects the
+    # Gazebo command sign that produces forward (+Y body) thrust.
+    thrust_output_sign: 1.0
+
+    # W is the positive pitch input and A is the positive yaw input.
+    # Flip an input sign if the key pair feels reversed.
+    pitch_input_sign: 1.0
+    yaw_input_sign: 1.0
+
+    # Individual fin signs keep model-specific joint conventions in YAML.
+    pitch_left_sign: 1.0
+    pitch_right_sign: 1.0
+    yaw_top_sign: 1.0
+    yaw_bottom_sign: 1.0
+
+    # Joint-position neutral values.
+    fin_top_neutral_rad: 0.0
+    fin_bottom_neutral_rad: 0.0
+    fin_left_neutral_rad: 0.0
+    fin_right_neutral_rad: 0.0
