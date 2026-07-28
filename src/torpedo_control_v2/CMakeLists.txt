@@ -11,46 +11,31 @@ find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 
-add_executable(
-  torpedo_control_node_v2
-  src/state_receiver.cpp
-  src/keyboard_input.cpp
-  src/control_logic.cpp
-  src/csv_logger.cpp
+add_executable(torpedo_control_node_v2
+  src/ros_interface.cpp
   src/torpedo_control_node.cpp
 )
 
 target_include_directories(torpedo_control_node_v2 PUBLIC include)
 target_compile_features(torpedo_control_node_v2 PUBLIC cxx_std_17)
 
-ament_target_dependencies(
-  torpedo_control_node_v2
+ament_target_dependencies(torpedo_control_node_v2
   nav_msgs
   rclcpp
   sensor_msgs
   std_msgs
 )
 
-install(
-  TARGETS torpedo_control_node_v2
+install(TARGETS torpedo_control_node_v2
   DESTINATION lib/${PROJECT_NAME}
 )
 
-install(
-  DIRECTORY include/
+install(DIRECTORY include/
   DESTINATION include
 )
 
-install(
-  DIRECTORY config launch
+install(DIRECTORY config launch
   DESTINATION share/${PROJECT_NAME}
 )
-
-if(BUILD_TESTING)
-  find_package(ament_lint_auto REQUIRED)
-  set(ament_cmake_copyright_FOUND TRUE)
-  set(ament_cmake_cpplint_FOUND TRUE)
-  ament_lint_auto_find_test_dependencies()
-endif()
 
 ament_package()
