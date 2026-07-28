@@ -1,0 +1,20 @@
+# --- ROS 2 / Colcon 빌드 결과물 ---
+build/
+install/
+log/
+
+# --- C++ / Python 빌드 및 캐시 ---
+*.o
+*.so
+*.a
+__pycache__/
+*.pyc
+
+# --- IDE / 에디터 설정 파일 ---
+.vscode/
+.idea/
+*.swp
+
+# --- OS 자동 생성 파일 ---
+.DS_Store
+Thumbs.db
