@@ -1,0 +1,128 @@
+bluerov_integration_node:
+  ros__parameters:
+    use_sim_time: true
+
+    topics:
+      pressure: "/model/bluerov2/pressure"
+      depth: "/model/bluerov2/Pressure_depth"
+      imu: "/model/bluerov2/imu"
+      bluerov_odometry: "/model/bluerov2/odometry"
+      dvl: "/dvl/velocity"
+      torpedo_odometry: "/torpedo/state/odometry"
+      mission_goal: "/mission/target_position"
+
+    status:
+      rate_hz: 1.0
+
+    planning:
+      enabled: true
+      check_rate_hz: 5.0
+      use_dynamic_map: true
+      use_target_topic_for_goal: true
+      goal_offset_x: 100.0
+      goal_offset_y: 0.0
+      goal_offset_z: 0.0
+      map_padding_x: 10.0
+      map_padding_y: 15.0
+      map_padding_z: 15.0
+      robot_replan_distance: 1.0
+      torpedo_replan_distance: 0.5
+      goal_replan_distance: 0.1
+
+      map:
+        min_x: -1000.0
+        max_x: 1000.0
+        min_y: -1000.0
+        max_y: 1000.0
+        min_z: -100.0
+        max_z: 100.0
+        resolution: 1.0
+        max_cells: 50000000
+
+      astar:
+        allow_diagonal: true
+        heuristic_weight: 1.2
+        tie_break_offset: 0.001
+        safety_margin: 0.0
+
+      barrier:
+        size_x: 3.0
+        size_y: 3.0
+        size_z: 3.0
+
+      topics:
+        path: "/uuv/reference_path"
+        current_point: "/uuv/current_position_point"
+        goal_point: "/uuv/goal_point"
+        torpedo_point: "/uuv/torpedo_center_point"
+        markers: "/rviz/uuv_astar_markers"
+
+    path_following:
+      enabled: true
+      stop_without_valid_path: true
+      require_matching_frame: true
+      lookahead_distance: 2.0
+      waypoint_reached_radius: 0.75
+      tracking_target_topic: "/ppid/tracking_target"
+
+    control:
+      enabled: true
+      rate_hz: 20.0
+      velocity_source: "odometry"
+      require_matching_target_frame: true
+      odometry_timeout_sec: 0.5
+      dvl_timeout_sec: 0.5
+      # 0 이하이면 마지막 목표 위치를 계속 유지한다.
+      target_timeout_sec: 0.0
+
+      thruster_topics:
+        - "/model/bluerov2/joint/thruster1_joint/cmd_thrust"
+        - "/model/bluerov2/joint/thruster2_joint/cmd_thrust"
+        - "/model/bluerov2/joint/thruster3_joint/cmd_thrust"
+        - "/model/bluerov2/joint/thruster4_joint/cmd_thrust"
+        - "/model/bluerov2/joint/thruster5_joint/cmd_thrust"
+        - "/model/bluerov2/joint/thruster6_joint/cmd_thrust"
+
+      position_gain:
+        x: 1.5
+        y: 1.5
+        z: 1.5
+      max_horizontal_speed: 3.0
+      max_vertical_speed: 1.5
+
+      velocity_pid:
+        x: {kp: 60.0, ki: 0.5, kd: 1.0, integral_limit: 2.0, output_limit: 450.0}
+        y: {kp: 60.0, ki: 0.5, kd: 1.0, integral_limit: 2.0, output_limit: 450.0}
+        z: {kp: 70.0, ki: 0.5, kd: 1.0, integral_limit: 2.0, output_limit: 100.0}
+
+      velocity_output_limit:
+        x: 100.0
+        y: 100.0
+        z: 100.0
+      velocity_feedforward:
+        x: 47.704251916
+        y: 76.593806538
+        z: 0.0
+
+      yaw_pid:
+        kp: 80.0
+        ki: 2.0
+        kd: 10.0
+        integral_limit: 5.0
+        output_limit: 100.0
+      yaw_command_limit: 100.0
+      heave_trim: 11.0
+
+      # team_byung 원본 믹서 계수다. 실제 모터 번호와 부호는 SITL 단독 시험 필요.
+      mixer:
+        command_limit: 120.0
+        x: [-0.25, -0.25, 0.25, 0.25, 0.0, 0.0]
+        y: [-0.25, 0.25, -0.25, 0.25, 0.0, 0.0]
+        z: [0.0, 0.0, 0.0, 0.0, -0.5, -0.5]
+        yaw: [-0.25, 0.25, 0.25, -0.25, 0.0, 0.0]
+
+      logging:
+        enabled: true
+        generate_html: true
+        directory: "ppid_logs"
+        queue_limit: 10000
