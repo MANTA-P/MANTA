@@ -1,13 +1,84 @@
 #!/usr/bin/env bash
 
-# MANTA installation and command runner.
+# MANTA bootstrap, installer, and command runner.
 # Run `bash manta.sh help` to see all commands.
 
 set -Eeuo pipefail
 
+readonly MANTA_REPOSITORY_URL="${MANTA_REPOSITORY_URL:-https://github.com/MANTA-P/MANTA.git}"
+readonly MANTA_REF="${MANTA_REF:-main}"
+readonly MANTA_INSTALL_DIR="${MANTA_INSTALL_DIR:-$HOME/manta_ws}"
+readonly MANTA_SOURCE_FILE="${BASH_SOURCE[0]:-}"
+
+bootstrap_fail() {
+  printf '오류: %s\n' "$*" >&2
+  exit 1
+}
+
+is_local_manta_checkout() {
+  local source_dir
+
+  [[ -n "$MANTA_SOURCE_FILE" && -f "$MANTA_SOURCE_FILE" ]] || return 1
+  source_dir="$(cd -- "$(dirname -- "$MANTA_SOURCE_FILE")" && pwd -P)"
+  [[ -f "$source_dir/manta.sh" && -d "$source_dir/src" ]]
+}
+
+bootstrap_manta() {
+  local target_dir="$MANTA_INSTALL_DIR"
+  local clone_required=0
+
+  if ((EUID == 0)); then
+    bootstrap_fail "MANTA 설치 전체를 sudo로 실행하지 마세요. 일반 사용자로 실행하면 필요한 단계에서만 sudo를 요청합니다."
+  fi
+
+  [[ -r /etc/os-release ]] || bootstrap_fail "/etc/os-release를 읽을 수 없습니다. Ubuntu 24.04에서 실행하세요."
+  # shellcheck disable=SC1091
+  source /etc/os-release
+  [[ "${ID:-}" == "ubuntu" && "${VERSION_ID:-}" == "24.04" ]] || \
+    bootstrap_fail "지원 환경은 Ubuntu 24.04 LTS입니다. 현재 환경: ${PRETTY_NAME:-알 수 없음}"
+
+  printf '\nMANTA 원격 설치를 시작합니다.\n'
+  printf '  저장소: %s\n' "$MANTA_REPOSITORY_URL"
+  printf '  브랜치/태그: %s\n' "$MANTA_REF"
+  printf '  설치 위치: %s\n' "$target_dir"
+
+  if ! command -v git >/dev/null 2>&1; then
+    printf '\nGit을 설치합니다.\n'
+    sudo apt-get update
+    sudo apt-get install -y git ca-certificates
+  fi
+
+  if [[ -d "$target_dir/.git" && -f "$target_dir/manta.sh" && -d "$target_dir/src" ]]; then
+    printf '\n기존 MANTA 작업공간을 사용합니다: %s\n' "$target_dir"
+    printf '기존 파일과 브랜치는 자동으로 변경하지 않습니다.\n'
+  elif [[ ! -e "$target_dir" ]]; then
+    clone_required=1
+  elif [[ -d "$target_dir" && -z "$(find "$target_dir" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+    clone_required=1
+  else
+    bootstrap_fail "$target_dir 경로가 비어 있지 않으며 유효한 MANTA 저장소가 아닙니다. 기존 내용을 확인한 뒤 다시 실행하세요."
+  fi
+
+  if ((clone_required)); then
+    printf '\nMANTA 저장소를 내려받습니다.\n'
+    git clone --branch "$MANTA_REF" --single-branch \
+      "$MANTA_REPOSITORY_URL" "$target_dir"
+  fi
+
+  [[ -f "$target_dir/manta.sh" && -d "$target_dir/src" ]] || \
+    bootstrap_fail "MANTA 저장소 구조를 확인할 수 없습니다: $target_dir"
+
+  printf '\n로컬 설치 스크립트로 전환합니다.\n'
+  exec /bin/bash "$target_dir/manta.sh" "$@"
+}
+
+if ! is_local_manta_checkout; then
+  bootstrap_manta "$@"
+fi
+
 readonly MANTA_ROS_SETUP="/opt/ros/jazzy/setup.bash"
 readonly MANTA_DAVE_INSTALLER_URL="https://raw.githubusercontent.com/IOES-Lab/dave/refs/heads/ros2/extras/ros-jazzy-gz-harmonic-install.sh"
-MANTA_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/$(basename -- "${BASH_SOURCE[0]}")"
+MANTA_SCRIPT="$(cd -- "$(dirname -- "$MANTA_SOURCE_FILE")" && pwd -P)/$(basename -- "$MANTA_SOURCE_FILE")"
 MANTA_WS="$(dirname -- "$MANTA_SCRIPT")"
 export MANTA_WS
 
@@ -195,7 +266,8 @@ EOF
 
   [[ -f "$MANTA_ROS_SETUP" ]] || system_ready=0
   command -v gz >/dev/null 2>&1 || system_ready=0
-  [[ -d /opt/ardusub_ws/ardupilot ]] || system_ready=0
+  [[ -d /opt/ardusub_ws/ardupilot/build/sitl/bin ]] || system_ready=0
+  [[ -d /opt/ardusub_ws/ardupilot_gazebo/build ]] || system_ready=0
 
   if ((skip_system_install)); then
     printf '\n[2/5] 요청에 따라 DAVE/ROS/Gazebo 시스템 설치를 생략합니다.\n'

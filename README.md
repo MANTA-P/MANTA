@@ -1,6 +1,6 @@
 # MANTA 프로젝트
 
-BlueROV 회피 제어와 위협 어뢰 제어를 DAVE 시뮬레이션에서 시험하는 ROS 2 Jazzy 프로젝트입니다.
+BlueROV 회피 제어와 위협 어뢰 제어를 DAVE 시뮬레이션에서 시험하는 ROS 2 Jazzy 프로젝트입니다. Gazebo GUI와 조이스틱은 사용하지 않으며, RViz에서 상태를 확인합니다.
 
 ## 처음 설치하기
 
@@ -13,11 +13,35 @@ BlueROV 회피 제어와 위협 어뢰 제어를 DAVE 시뮬레이션에서 시�
 - `sudo` 권한
 - 충분한 저장 공간
 
-설치 스크립트는 ROS 2 Jazzy, Gazebo Harmonic, ArduSub 및 관련 시스템 패키지를 설치합니다. 최초 설치는 시스템 전체 업그레이드를 포함하므로 시간이 오래 걸릴 수 있습니다.
+최초 설치는 시스템 전체 업그레이드, ROS 2 Jazzy, Gazebo Harmonic 및 ArduSub 설치와 빌드를 포함하므로 시간이 오래 걸릴 수 있습니다.
 
-### 1. 저장소 받기
+### 한 줄 자동 설치—권장
 
-터미널을 열고 아래 명령을 순서대로 실행합니다.
+터미널에서 다음 한 줄을 일반 사용자로 실행합니다.
+
+```bash
+sudo apt update && sudo apt install -y curl && /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/MANTA-P/MANTA/main/manta.sh)"
+```
+
+> 명령 전체 앞에 `sudo`를 붙이지 마세요. 스크립트가 시스템 변경이 필요한 단계에서만 `sudo` 암호를 요청합니다.
+
+원격으로 받은 `manta.sh`는 다음 작업을 순서대로 수행합니다.
+
+1. Ubuntu 24.04 및 일반 사용자 실행 여부 확인
+2. Git 설치 여부 확인
+3. MANTA 저장소를 `~/manta_ws`에 clone
+4. ROS 2 Jazzy, Gazebo Harmonic 및 ArduSub 설치
+5. `rosdep`으로 MANTA 의존성 설치
+6. `colcon build --symlink-install`로 `~/manta_ws/src` 전체 빌드
+7. `~/.bashrc`에 ROS 환경과 MANTA 명령어 등록
+
+시스템 설치 여부를 묻는 메시지가 나오면 내용을 확인한 뒤 `y`를 입력합니다. 설치 중 오류가 발생하면 마지막 오류를 해결한 뒤 같은 한 줄 명령을 다시 실행하면 됩니다.
+
+`~/manta_ws`에 정상적인 MANTA 저장소가 이미 있으면 기존 파일과 브랜치를 변경하지 않고 해당 작업공간을 사용합니다. 다른 파일이 들어 있는 폴더라면 내용을 덮어쓰지 않고 오류와 함께 중단합니다.
+
+### 수동 설치—대체 방법
+
+한 줄 설치를 사용하지 않으려면 저장소를 직접 받은 뒤 로컬 스크립트를 실행합니다.
 
 ```bash
 sudo apt update
@@ -25,32 +49,22 @@ sudo apt install -y git
 
 git clone https://github.com/MANTA-P/MANTA.git ~/manta_ws
 cd ~/manta_ws
-```
-
-`~/manta_ws`가 이미 존재하고 비어 있지 않다면 기존 폴더를 삭제하거나 강제로 초기화하지 말고, 먼저 기존 작업 내용을 확인하세요.
-
-### 2. 자동 설치 및 빌드
-
-저장소 루트에 있는 `manta.sh`를 일반 사용자로 실행합니다.
-
-```bash
-cd ~/manta_ws
 bash manta.sh
 ```
 
-> `sudo bash manta.sh`로 실행하지 마세요. 스크립트가 시스템 설치에 필요한 단계에서만 `sudo` 암호를 요청합니다.
+`~/manta_ws`가 이미 존재하고 비어 있지 않다면 삭제하거나 강제로 초기화하지 말고 기존 작업 내용을 먼저 확인하세요.
 
-스크립트는 다음 작업을 자동으로 수행합니다.
+### 개발 브랜치 설치 시험
 
-1. Ubuntu 버전과 작업공간 구조 확인
-2. DAVE, ROS 2 Jazzy, Gazebo Harmonic 및 ArduSub 설치
-3. `rosdep` 의존성 설치
-4. `colcon build --symlink-install` 실행
-5. `~/.bashrc`에 ROS 환경과 MANTA 명령어 등록
+`dev` 브랜치의 스크립트를 시험할 때는 내려받는 스크립트와 clone할 브랜치를 모두 `dev`로 지정합니다.
 
-시스템 설치 여부를 묻는 메시지가 나오면 내용을 확인한 뒤 `y`를 입력합니다. 설치 중 오류가 발생하면 마지막 오류 메시지를 확인하고, 문제를 해결한 뒤 `bash manta.sh`를 다시 실행하면 됩니다. `bash manta.sh install`도 같은 동작입니다.
+```bash
+MANTA_REF=dev /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/MANTA-P/MANTA/dev/manta.sh)"
+```
 
-### 3. 설치된 명령어 적용
+일반 사용자용 README와 정식 배포에서는 `main` 명령을 사용합니다.
+
+### 설치된 명령어 적용
 
 설치가 끝나면 새 터미널을 열거나 다음 명령을 실행합니다.
 
@@ -88,10 +102,24 @@ manta1
 
 BlueROV와 `dave_ocean_waves` Gazebo 환경을 GUI 없이 실행합니다. Gazebo가 완전히 시작될 때까지 기다린 뒤 2번을 실행하세요.
 
-기본 깊이 `-0.5` 대신 다른 초기 Z 좌표를 사용하려면 숫자 하나를 추가합니다.
+기본 깊이 `-0.5` 대신 다른 초기 Z 좌표만 지정하려면 숫자 하나를 추가합니다.
 
 ```bash
 manta1 -1.0
+```
+
+초기 `X Y Z` 좌표를 모두 지정하려면 숫자 3개를 순서대로 추가합니다.
+
+```bash
+manta1 5 3 -1.0
+```
+
+정리하면 `manta1`은 인자 0개, 1개 또는 3개를 받습니다.
+
+```text
+manta1              기존 기본 X/Y, Z=-0.5
+manta1 Z            Z만 지정
+manta1 X Y Z        X/Y/Z 모두 지정
 ```
 
 ### 2. 위협 어뢰 생성
@@ -218,4 +246,4 @@ GitHub 저장소 루트/
     └── torpedo_control_v2/
 ```
 
-`manta.sh`는 설치 프로그램이면서 모든 MANTA 실행 명령을 제공하는 스크립트입니다. 설치 시 `~/.bashrc`에 등록되는 alias는 이 스크립트의 하위 명령을 호출합니다. 따라서 파일 이름이나 위치를 변경하면 alias도 다시 등록해야 합니다.
+`manta.sh`는 원격 bootstrap, 로컬 설치 프로그램 및 모든 MANTA 실행 명령을 함께 제공합니다. 원격으로 실행하면 저장소를 받은 뒤 clone된 로컬 `manta.sh`로 전환합니다. 설치 시 `~/.bashrc`에 등록되는 alias도 이 로컬 스크립트의 하위 명령을 호출합니다. 따라서 파일 이름이나 위치를 변경하면 alias를 다시 등록해야 합니다.
