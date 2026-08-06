@@ -374,7 +374,7 @@ command_bluerov() {
 
   load_ros_environment
   exec ros2 launch dave_demos dave_robot.launch.py \
-    headless:=true \
+    headless:=false \
     "${position_arguments[@]}" \
     z:="$z" \
     namespace:=bluerov2 \
