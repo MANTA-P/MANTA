@@ -427,7 +427,7 @@
       <kPa_per_meter>9.80638</kPa_per_meter>
     </plugin>
 
-    <include>
+    <!-- <include>
       <uri>/home/user/dave_ws/src/dave/models/dave_sensor_models/description/nortek_dvl1000_300/model.sdf</uri>
       <pose>0 0 -0.15 0 0 0</pose>
     </include>
@@ -435,7 +435,7 @@
     <joint name="dvl_joint" type="fixed">
       <parent>base_link</parent>
       <child>nortek_dvl1000_300::dvl1000_base_link</child>
-    </joint>
+    </joint> -->
 
   </model>
 </sdf>
