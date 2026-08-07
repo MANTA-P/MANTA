@@ -27,11 +27,12 @@ public:
     const BoxObstacle & barrier_shape,
     bool show_barrier);
   void publishTelemetry(const common::StateSnapshot & snapshot);
+  // torpedo_obstacles[0]은 어뢰 현재 위치 박스, 나머지는 예측 통로 박스다.
   void publishScene(
     const std::string & frame_id,
     const Point3D & current,
     const Point3D & goal,
-    const BoxObstacle & torpedo,
+    const std::vector<BoxObstacle> & torpedo_obstacles,
     const std::vector<Point3D> & path);
 
 private:
@@ -51,6 +52,9 @@ private:
 
   rclcpp::Clock::SharedPtr clock_;
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr marker_pub_;
+  // transient_local 마커는 지우지 않으면 남으므로 직전 박스 개수를 기억해
+  // 줄어든 만큼 DELETE를 발행한다.
+  std::size_t last_barrier_count_{0};
 };
 
 }  // namespace bluerov_integration::team_min

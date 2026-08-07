@@ -176,11 +176,24 @@ void PlanningModule::updateTorpedoVelocity(
 
   const Point3D position = positionOf(sample.message);
   const auto stamp = sample.metadata.received_steady_time;
+  const rclcpp::Time message_stamp(sample.message.header.stamp, RCL_ROS_TIME);
   const std::string & frame = sample.message.header.frame_id;
 
   if (have_torpedo_history_ && frame == last_torpedo_frame_) {
-    const double dt =
+    // use_sim_time에서 RTF가 1이 아니면 wall-clock dt로는 속도가 왜곡되므로
+    // 메시지 스탬프(sim time) 차분을 우선 쓰고, 스탬프가 없거나 역행하면
+    // 수신 시각 차분으로 폴백한다.
+    double dt =
       std::chrono::duration<double>(stamp - last_torpedo_stamp_).count();
+    if (message_stamp.nanoseconds() > 0 &&
+      last_torpedo_msg_stamp_.nanoseconds() > 0)
+    {
+      const double message_dt =
+        (message_stamp - last_torpedo_msg_stamp_).seconds();
+      if (message_dt > 0.0) {
+        dt = message_dt;
+      }
+    }
     if (dt > 1.0e-3 && dt < 2.0) {
       const Point3D raw{
         (position.x - last_torpedo_position_.x) / dt,
@@ -205,6 +218,7 @@ void PlanningModule::updateTorpedoVelocity(
 
   last_torpedo_position_ = position;
   last_torpedo_stamp_ = stamp;
+  last_torpedo_msg_stamp_ = message_stamp;
   last_torpedo_frame_ = frame;
   last_torpedo_sequence_ = sample.metadata.sequence;
   have_torpedo_history_ = true;
@@ -468,6 +482,25 @@ void PlanningModule::execute(const PlanningRequest & request)
   const auto calculation_start = std::chrono::steady_clock::now();
   try {
     const auto obstacles = buildTorpedoObstacles(request);
+    // 어뢰 현재 위치 박스가 start/goal을 덮으면 A*는 성공할 수 없다.
+    // 일반 예외 대신 원인을 명시하고, 어뢰가 지나간 뒤의 재시도(경로가
+    // 없으므로 needsReplan이 계속 true)에 맡긴다.
+    const auto & live_barrier = obstacles.front();
+    if (boxContains(live_barrier, request.goal, config_.astar.safety_margin)) {
+      RCLCPP_WARN_THROTTLE(
+        logger_, *clock_, 2000,
+        "team_min goal (%.1f, %.1f, %.1f) is inside the torpedo barrier; "
+        "waiting for the torpedo to move away",
+        request.goal.x, request.goal.y, request.goal.z);
+      return;
+    }
+    if (boxContains(live_barrier, request.start, config_.astar.safety_margin)) {
+      RCLCPP_WARN_THROTTLE(
+        logger_, *clock_, 2000,
+        "team_min start is inside the torpedo barrier; cannot plan until "
+        "the torpedo moves away");
+      return;
+    }
     const auto path = runEnhancedAStar3D(
       request.start,
       request.goal,

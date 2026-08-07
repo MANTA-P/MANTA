@@ -1,12 +1,15 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -17,6 +20,31 @@
 
 namespace bluerov_integration::team_min
 {
+
+// 어뢰 진행방향 앞에 예측 박스를 깔아 통로(corridor)를 만드는 설정이다.
+// 어뢰가 예측대로 움직이는 동안 점유 격자가 유지되어 경로가 고정된다.
+struct PredictionConfig
+{
+  bool enabled{true};
+  double horizon_sec{4.0};      // 예측 시간(어뢰 ~12 m/s가 4초간 가는 거리 커버)
+  double spacing{1.5};          // 박스 간격(박스 크기의 절반이면 겹침)
+  int max_boxes{32};            // 예측 박스 상한(통로 길이 = spacing*max_boxes = 48 m)
+  double min_speed{0.2};        // m/s, 이하면 예측을 끈다(노이즈 게이트)
+  double velocity_alpha{0.3};   // 속도 EMA 계수
+  double start_clearance{0.5};  // 로봇/목표를 덮는 박스 스킵 여유
+};
+
+// 재계획 정책이다. collision_only가 true면 어뢰/로봇 이동 거리 대신
+// "기존 경로가 새 통로와 충돌하거나 로봇이 경로를 이탈했을 때"만
+// 재계획한다(히스테리시스). 어뢰가 예측대로 움직이는 동안 A*가 아예
+// 다시 돌지 않으므로 경로가 완전히 고정된다.
+struct ReplanPolicyConfig
+{
+  bool collision_only{true};
+  double path_deviation_distance{1.5};  // 로봇-경로 이탈 허용치(m)
+  double collision_margin{0.3};         // 경로-박스 충돌 판정 여유(m)
+  double min_interval_sec{0.5};         // 재계획 요청 최소 간격(초)
+};
 
 struct PlanningConfig
 {
@@ -35,6 +63,8 @@ struct PlanningConfig
   GridMapConfig fixed_map{};
   AStarOptions astar{};
   BoxObstacle torpedo_barrier{};
+  PredictionConfig prediction{};
+  ReplanPolicyConfig replan{};
   std::string path_topic{"/uuv/reference_path"};
   std::string current_point_topic{"/uuv/current_position_point"};
   std::string goal_point_topic{"/uuv/goal_point"};
@@ -59,6 +89,9 @@ private:
     Point3D start;
     Point3D goal;
     Point3D torpedo;
+    // 추정된 어뢰 속도다. 예측 통로 생성에만 쓰고 needsReplan 비교에서는
+    // 제외한다(속도는 항상 조금씩 변하므로 비교하면 매번 재계획된다).
+    Point3D torpedo_velocity;
     std::string frame_id;
   };
 
@@ -66,8 +99,20 @@ private:
   static bool framesCompatible(
     const std::string & first,
     const std::string & second);
-  bool needsReplan(const PlanningRequest & request) const;
-  GridMapConfig planningMap(const PlanningRequest & request) const;
+  static bool boxContains(
+    const BoxObstacle & box,
+    const Point3D & point,
+    double margin);
+  bool needsReplan(
+    const PlanningRequest & request,
+    const std::vector<BoxObstacle> & obstacles) const;
+  void updateTorpedoVelocity(
+    const common::ReceivedSample<nav_msgs::msg::Odometry> & sample);
+  std::vector<BoxObstacle> buildTorpedoObstacles(
+    const PlanningRequest & request) const;
+  GridMapConfig planningMap(
+    const PlanningRequest & request,
+    const std::vector<BoxObstacle> & obstacles) const;
   void workerLoop();
   void execute(const PlanningRequest & request);
   void publishPoint(
@@ -89,6 +134,23 @@ private:
   std::optional<PlanningRequest> pending_request_;
   std::optional<PlanningRequest> last_requested_;
   std::optional<Point3D> fixed_goal_;
+  // 마지막으로 발행한 경로다. worker가 쓰고 update()가 읽으므로
+  // request_mutex_ 아래에서만 접근한다.
+  std::vector<Point3D> last_path_;
+  std::chrono::steady_clock::time_point last_replan_request_time_{};
+
+  // 어뢰 속도 추정(위치 차분 + EMA) 상태다. update()를 부르는 planning
+  // 타이머(MutuallyExclusive 그룹)에서만 접근하므로 별도 잠금이 필요 없다.
+  bool have_torpedo_history_{false};
+  bool have_torpedo_velocity_{false};
+  std::uint64_t last_torpedo_sequence_{0};
+  Point3D last_torpedo_position_{};
+  std::chrono::steady_clock::time_point last_torpedo_stamp_{};
+  // use_sim_time에서 RTF(실시간 배율)와 무관하게 dt를 재기 위한 메시지 스탬프.
+  rclcpp::Time last_torpedo_msg_stamp_{0, 0, RCL_ROS_TIME};
+  std::string last_torpedo_frame_{};
+  Point3D torpedo_velocity_{};
+
   std::atomic<bool> running_{false};
   std::thread worker_;
 };
