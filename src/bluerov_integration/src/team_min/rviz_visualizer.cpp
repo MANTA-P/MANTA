@@ -216,6 +216,64 @@ void RvizVisualizer::publishTelemetry(
   marker_pub_->publish(marker);
 }
 
+void RvizVisualizer::publishStatus(
+  const std::string & frame_id,
+  const Point3D & position,
+  const bool avoid_mode,
+  const bool hit_latched,
+  const double hit_distance,
+  const bool show_avoided,
+  const double avoided_distance)
+{
+  auto mode = baseMarker(
+    frame_id, "planning_status", 0,
+    visualization_msgs::msg::Marker::TEXT_VIEW_FACING);
+  mode.pose.position.x = position.x;
+  mode.pose.position.y = position.y;
+  mode.pose.position.z = position.z + 3.4;
+  mode.scale.z = 0.5;
+  if (avoid_mode) {
+    mode.color.r = 1.0F;
+    mode.color.g = 0.6F;
+    mode.color.b = 0.1F;
+  } else {
+    mode.color.r = 0.6F;
+    mode.color.g = 1.0F;
+    mode.color.b = 0.6F;
+  }
+  mode.color.a = 1.0F;
+  mode.text = avoid_mode ? "MODE: AVOID" : "MODE: NORMAL";
+  marker_pub_->publish(mode);
+
+  auto event = baseMarker(
+    frame_id, "engagement_event", 0,
+    visualization_msgs::msg::Marker::TEXT_VIEW_FACING);
+  event.pose.position.x = position.x;
+  event.pose.position.y = position.y;
+  event.pose.position.z = position.z + 4.4;
+  if (hit_latched) {
+    std::ostringstream text;
+    text << std::fixed << std::setprecision(2)
+         << "HIT! (" << hit_distance << " m)";
+    event.text = text.str();
+    event.scale.z = 1.0;
+    event.color.r = 1.0F;
+    event.color.a = 1.0F;
+  } else if (show_avoided) {
+    std::ostringstream text;
+    text << std::fixed << std::setprecision(1)
+         << "AVOIDED (min " << avoided_distance << " m)";
+    event.text = text.str();
+    event.scale.z = 0.6;
+    event.color.g = 1.0F;
+    event.color.a = 1.0F;
+  } else {
+    // 이벤트가 없으면 transient_local로 남은 텍스트를 지운다.
+    event.action = visualization_msgs::msg::Marker::DELETE;
+  }
+  marker_pub_->publish(event);
+}
+
 void RvizVisualizer::publishScene(
   const std::string & frame_id,
   const Point3D & current,

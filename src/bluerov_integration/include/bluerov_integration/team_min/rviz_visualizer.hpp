@@ -34,6 +34,15 @@ public:
     const Point3D & goal,
     const std::vector<BoxObstacle> & torpedo_obstacles,
     const std::vector<Point3D> & path);
+  // NORMAL/AVOID 모드와 교전 결과(HIT/AVOIDED)를 ROV 위 텍스트로 표시한다.
+  void publishStatus(
+    const std::string & frame_id,
+    const Point3D & position,
+    bool avoid_mode,
+    bool hit_latched,
+    double hit_distance,
+    bool show_avoided,
+    double avoided_distance);
 
 private:
   visualization_msgs::msg::Marker baseMarker(

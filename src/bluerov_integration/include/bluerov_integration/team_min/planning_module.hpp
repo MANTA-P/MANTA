@@ -46,6 +46,16 @@ struct ReplanPolicyConfig
   double min_interval_sec{0.5};         // 재계획 요청 최소 간격(초)
 };
 
+// 어뢰 탐지/교전 판정 설정이다. 탐지는 odometry 수신 신선도로 판단해
+// NORMAL(장애물 없이 계획)/AVOID(통로 회피) 모드를 가르고, 교전 결과
+// (HIT/AVOIDED)는 ROV-어뢰 최근접 거리로 판정한다.
+struct AvoidConfig
+{
+  double torpedo_timeout_sec{2.0};  // 이 시간 내 수신이 없으면 NORMAL 복귀
+  double engage_radius{30.0};       // 교전 시작 반경(m)
+  double hit_radius{1.0};           // 피격 판정 최근접 거리(m)
+};
+
 struct PlanningConfig
 {
   bool enabled{true};
@@ -65,6 +75,7 @@ struct PlanningConfig
   BoxObstacle torpedo_barrier{};
   PredictionConfig prediction{};
   ReplanPolicyConfig replan{};
+  AvoidConfig avoid{};
   std::string path_topic{"/uuv/reference_path"};
   std::string current_point_topic{"/uuv/current_position_point"};
   std::string goal_point_topic{"/uuv/goal_point"};
@@ -92,6 +103,9 @@ private:
     // 추정된 어뢰 속도다. 예측 통로 생성에만 쓰고 needsReplan 비교에서는
     // 제외한다(속도는 항상 조금씩 변하므로 비교하면 매번 재계획된다).
     Point3D torpedo_velocity;
+    // false면 어뢰 미탐지(NORMAL 모드)로, torpedo/torpedo_velocity 값은
+    // 무시되고 장애물 없이 계획한다.
+    bool torpedo_valid{false};
     std::string frame_id;
   };
 
@@ -103,11 +117,22 @@ private:
     const BoxObstacle & box,
     const Point3D & point,
     double margin);
+  static double closestApproachDistance(
+    const Point3D & rov_previous,
+    const Point3D & rov_current,
+    const Point3D & torpedo_previous,
+    const Point3D & torpedo_current);
   bool needsReplan(
     const PlanningRequest & request,
     const std::vector<BoxObstacle> & obstacles) const;
   void updateTorpedoVelocity(
     const common::ReceivedSample<nav_msgs::msg::Odometry> & sample);
+  void updateEngagement(
+    const common::StateSnapshot & snapshot,
+    bool torpedo_detected,
+    const Point3D & rov_position,
+    const std::string & frame_id);
+  void publishStopPath(const std::string & frame_id);
   std::vector<BoxObstacle> buildTorpedoObstacles(
     const PlanningRequest & request) const;
   GridMapConfig planningMap(
@@ -150,6 +175,22 @@ private:
   rclcpp::Time last_torpedo_msg_stamp_{0, 0, RCL_ROS_TIME};
   std::string last_torpedo_frame_{};
   Point3D torpedo_velocity_{};
+
+  // NORMAL/AVOID 모드와 교전(HIT/AVOIDED) 판정 상태다. update() 타이머
+  // 스레드 전용이라 잠금이 없고, hit_latched_만 worker가 낡은 계획 결과의
+  // 발행을 억제할 때 읽으므로 atomic으로 둔다.
+  bool avoid_mode_{false};
+  bool engaged_{false};
+  double engagement_min_distance_{0.0};
+  std::atomic<bool> hit_latched_{false};
+  double hit_distance_{0.0};
+  std::uint64_t hit_mission_sequence_{0};
+  bool have_avoided_event_{false};
+  double avoided_min_distance_{0.0};
+  std::chrono::steady_clock::time_point avoided_event_time_{};
+  bool have_engagement_history_{false};
+  Point3D previous_rov_position_{};
+  Point3D previous_torpedo_position_{};
 
   std::atomic<bool> running_{false};
   std::thread worker_;
