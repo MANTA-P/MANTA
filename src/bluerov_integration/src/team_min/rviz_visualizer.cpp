@@ -216,11 +216,69 @@ void RvizVisualizer::publishTelemetry(
   marker_pub_->publish(marker);
 }
 
+void RvizVisualizer::publishStatus(
+  const std::string & frame_id,
+  const Point3D & position,
+  const bool avoid_mode,
+  const bool hit_latched,
+  const double hit_distance,
+  const bool show_avoided,
+  const double avoided_distance)
+{
+  auto mode = baseMarker(
+    frame_id, "planning_status", 0,
+    visualization_msgs::msg::Marker::TEXT_VIEW_FACING);
+  mode.pose.position.x = position.x;
+  mode.pose.position.y = position.y;
+  mode.pose.position.z = position.z + 3.4;
+  mode.scale.z = 0.5;
+  if (avoid_mode) {
+    mode.color.r = 1.0F;
+    mode.color.g = 0.6F;
+    mode.color.b = 0.1F;
+  } else {
+    mode.color.r = 0.6F;
+    mode.color.g = 1.0F;
+    mode.color.b = 0.6F;
+  }
+  mode.color.a = 1.0F;
+  mode.text = avoid_mode ? "MODE: AVOID" : "MODE: NORMAL";
+  marker_pub_->publish(mode);
+
+  auto event = baseMarker(
+    frame_id, "engagement_event", 0,
+    visualization_msgs::msg::Marker::TEXT_VIEW_FACING);
+  event.pose.position.x = position.x;
+  event.pose.position.y = position.y;
+  event.pose.position.z = position.z + 4.4;
+  if (hit_latched) {
+    std::ostringstream text;
+    text << std::fixed << std::setprecision(2)
+         << "HIT! (" << hit_distance << " m)";
+    event.text = text.str();
+    event.scale.z = 1.0;
+    event.color.r = 1.0F;
+    event.color.a = 1.0F;
+  } else if (show_avoided) {
+    std::ostringstream text;
+    text << std::fixed << std::setprecision(1)
+         << "AVOIDED (min " << avoided_distance << " m)";
+    event.text = text.str();
+    event.scale.z = 0.6;
+    event.color.g = 1.0F;
+    event.color.a = 1.0F;
+  } else {
+    // 이벤트가 없으면 transient_local로 남은 텍스트를 지운다.
+    event.action = visualization_msgs::msg::Marker::DELETE;
+  }
+  marker_pub_->publish(event);
+}
+
 void RvizVisualizer::publishScene(
   const std::string & frame_id,
   const Point3D & current,
   const Point3D & goal,
-  const BoxObstacle & torpedo,
+  const std::vector<BoxObstacle> & torpedo_obstacles,
   const std::vector<Point3D> & path)
 {
   auto robot = baseMarker(
@@ -243,25 +301,54 @@ void RvizVisualizer::publishScene(
   goal_marker.color.a = 1.0F;
   marker_pub_->publish(goal_marker);
 
-  auto torpedo_center = baseMarker(
-    frame_id, "torpedo_center", 0, visualization_msgs::msg::Marker::SPHERE);
-  torpedo_center.pose.position.x = torpedo.center.x;
-  torpedo_center.pose.position.y = torpedo.center.y;
-  torpedo_center.pose.position.z = torpedo.center.z;
-  torpedo_center.scale.x = torpedo_center.scale.y = torpedo_center.scale.z = 0.5;
-  torpedo_center.color.b = 1.0F;
-  torpedo_center.color.a = 1.0F;
-  marker_pub_->publish(torpedo_center);
+  if (!torpedo_obstacles.empty()) {
+    const auto & live = torpedo_obstacles.front();
+    auto torpedo_center = baseMarker(
+      frame_id, "torpedo_center", 0, visualization_msgs::msg::Marker::SPHERE);
+    torpedo_center.pose.position.x = live.center.x;
+    torpedo_center.pose.position.y = live.center.y;
+    torpedo_center.pose.position.z = live.center.z;
+    torpedo_center.scale.x = torpedo_center.scale.y =
+      torpedo_center.scale.z = 0.5;
+    torpedo_center.color.b = 1.0F;
+    torpedo_center.color.a = 1.0F;
+    marker_pub_->publish(torpedo_center);
+  }
 
-  auto barrier = baseMarker(
-    frame_id, "torpedo_barrier", 0, visualization_msgs::msg::Marker::CUBE);
-  barrier.pose.position = torpedo_center.pose.position;
-  barrier.scale.x = torpedo.size_x;
-  barrier.scale.y = torpedo.size_y;
-  barrier.scale.z = torpedo.size_z;
-  barrier.color.b = 1.0F;
-  barrier.color.a = 0.2F;
-  marker_pub_->publish(barrier);
+  // 0번은 현재 위치 박스(파랑), 1번부터는 예측 통로 박스(연한 시안)다.
+  for (std::size_t index = 0; index < torpedo_obstacles.size(); ++index) {
+    const auto & obstacle = torpedo_obstacles[index];
+    auto barrier = baseMarker(
+      frame_id, "torpedo_barrier", static_cast<int>(index),
+      visualization_msgs::msg::Marker::CUBE);
+    barrier.pose.position.x = obstacle.center.x;
+    barrier.pose.position.y = obstacle.center.y;
+    barrier.pose.position.z = obstacle.center.z;
+    barrier.scale.x = obstacle.size_x;
+    barrier.scale.y = obstacle.size_y;
+    barrier.scale.z = obstacle.size_z;
+    if (index == 0) {
+      barrier.color.b = 1.0F;
+      barrier.color.a = 0.2F;
+    } else {
+      barrier.color.g = 0.7F;
+      barrier.color.b = 1.0F;
+      barrier.color.a = 0.12F;
+    }
+    marker_pub_->publish(barrier);
+  }
+
+  // 박스 개수가 줄었으면 이전에 그린 잔여 마커를 지운다.
+  for (std::size_t index = torpedo_obstacles.size();
+    index < last_barrier_count_; ++index)
+  {
+    auto stale = baseMarker(
+      frame_id, "torpedo_barrier", static_cast<int>(index),
+      visualization_msgs::msg::Marker::CUBE);
+    stale.action = visualization_msgs::msg::Marker::DELETE;
+    marker_pub_->publish(stale);
+  }
+  last_barrier_count_ = torpedo_obstacles.size();
 
   auto arrow = baseMarker(
     frame_id, "goal_arrow", 0, visualization_msgs::msg::Marker::ARROW);
