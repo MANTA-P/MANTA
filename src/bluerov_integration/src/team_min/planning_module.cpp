@@ -72,6 +72,86 @@ AvoidConfig loadAvoidParameters(
   return defaults;
 }
 
+// Dynamic VO: parameters are declared by the team_min adapter.
+DynamicVOOptions loadDynamicVOParameters(
+  rclcpp::Node & node,
+  DynamicVOOptions defaults)
+{
+  defaults.prediction_horizon = node.declare_parameter<double>(
+    "planning.dynamic_vo.prediction_horizon", defaults.prediction_horizon);
+  defaults.rollout_step = node.declare_parameter<double>(
+    "planning.dynamic_vo.rollout_step", defaults.rollout_step);
+  const auto rollout_steps = node.declare_parameter<std::int64_t>(
+    "planning.dynamic_vo.rollout_steps",
+    static_cast<std::int64_t>(defaults.rollout_steps));
+  if (rollout_steps <= 0) {
+    throw std::invalid_argument("planning.dynamic_vo.rollout_steps must be positive");
+  }
+  defaults.rollout_steps = static_cast<std::size_t>(rollout_steps);
+  defaults.max_horizontal_speed = node.declare_parameter<double>(
+    "planning.dynamic_vo.max_horizontal_speed", defaults.max_horizontal_speed);
+  defaults.max_vertical_speed = node.declare_parameter<double>(
+    "planning.dynamic_vo.max_vertical_speed", defaults.max_vertical_speed);
+  defaults.robot_radius = node.declare_parameter<double>(
+    "planning.dynamic_vo.robot_radius", defaults.robot_radius);
+  defaults.safety_margin = node.declare_parameter<double>(
+    "planning.dynamic_vo.safety_margin", defaults.safety_margin);
+  defaults.goal_tolerance = node.declare_parameter<double>(
+    "planning.dynamic_vo.goal_tolerance", defaults.goal_tolerance);
+  defaults.path_lookahead = node.declare_parameter<double>(
+    "planning.dynamic_vo.path_lookahead", defaults.path_lookahead);
+  return defaults;
+}
+
+struct LocalTarget
+{
+  Point3D point;
+  std::size_t index{0U};
+};
+
+// Dynamic VO: choose a forward A* waypoint instead of the mission goal.
+LocalTarget selectLocalTarget(
+  const Point3D & position,
+  const std::vector<Point3D> & path,
+  const double lookahead)
+{
+  std::size_t closest = 0U;
+  double closest_distance = std::numeric_limits<double>::infinity();
+  for (std::size_t index = 0; index < path.size(); ++index) {
+    const double candidate = distance3D(position, path[index]);
+    if (candidate < closest_distance) {
+      closest_distance = candidate;
+      closest = index;
+    }
+  }
+  double accumulated = 0.0;
+  std::size_t target = closest;
+  while (target + 1U < path.size() && accumulated < lookahead) {
+    accumulated += distance3D(path[target], path[target + 1U]);
+    ++target;
+  }
+  return {path[target], target};
+}
+
+// Dynamic VO: reconnect the local avoidance path to the untouched A* suffix.
+std::vector<Point3D> mergePaths(
+  std::vector<Point3D> local_path,
+  const std::vector<Point3D> & global_path,
+  const std::size_t reconnect_index)
+{
+  if (local_path.empty()) {
+    return global_path;
+  }
+  std::size_t suffix = reconnect_index;
+  if (suffix < global_path.size() &&
+    distance3D(local_path.back(), global_path[suffix]) <= 1.0e-6)
+  {
+    ++suffix;
+  }
+  local_path.insert(local_path.end(), global_path.begin() + suffix, global_path.end());
+  return local_path;
+}
+
 // 노드가 채운 평면 PlanningConfig에서 코어가 아는 값만 옮긴다.
 // ROS 토픽명은 코어로 넘어가지 않는다.
 PlanningCoreConfig toCoreConfig(const PlanningConfig & config)
@@ -112,6 +192,8 @@ PlanningModule::PlanningModule(rclcpp::Node & node, PlanningConfig config)
   config_.prediction = loadPredictionParameters(node, config_.prediction);
   config_.replan = loadReplanParameters(node, config_.replan);
   config_.avoid = loadAvoidParameters(node, config_.avoid);
+  // Dynamic VO: load defaults without changing the integration node.
+  config_.dynamic_vo = loadDynamicVOParameters(node, config_.dynamic_vo);
   core_config_ = toCoreConfig(config_);
 
   const auto latched_qos =
@@ -316,7 +398,11 @@ void PlanningModule::handleDecision(
   if (decision.plan_request) {
     {
       std::lock_guard<std::mutex> lock(request_mutex_);
-      pending_request_ = *decision.plan_request;
+      // Dynamic VO: newest state replaces stale local-planning work.
+      const bool preserve_global_replan = decision.global_replan_required ||
+        (pending_request_ && pending_request_->global_replan_required);
+      pending_request_ = PlanningWork{
+        *decision.plan_request, preserve_global_replan};
     }
     request_cv_.notify_one();
   }
@@ -340,7 +426,7 @@ void PlanningModule::publishStopPath(const std::string & frame_id)
 void PlanningModule::workerLoop()
 {
   while (running_.load()) {
-    std::optional<PlanRequest> request;
+    std::optional<PlanningWork> request;
     {
       std::unique_lock<std::mutex> lock(request_mutex_);
       request_cv_.wait(lock, [this]() {
@@ -358,8 +444,9 @@ void PlanningModule::workerLoop()
   }
 }
 
-void PlanningModule::execute(const PlanRequest & request)
+void PlanningModule::execute(const PlanningWork & work)
 {
+  const PlanRequest & request = work.request;
   const auto calculation_start = std::chrono::steady_clock::now();
   try {
     const auto obstacles = buildTorpedoObstacles(request, core_config_);
@@ -389,15 +476,45 @@ void PlanningModule::execute(const PlanRequest & request)
         return;
       }
     }
-    const auto path = runEnhancedAStar3D(
-      request.start,
-      request.goal,
-      planningMap(request, obstacles, core_config_),
-      obstacles,
-      core_config_.astar);
-    if (path.empty()) {
-      RCLCPP_WARN(logger_, "team_min A* found no path");
-      return;
+    const GridMapConfig map = planningMap(request, obstacles, core_config_);
+    // Dynamic VO: refresh the global path only when PlanningCore requests A*.
+    if (work.global_replan_required || global_path_.empty()) {
+      auto new_global_path = runEnhancedAStar3D(
+        request.start, request.goal, map, obstacles, core_config_.astar);
+      if (new_global_path.empty()) {
+        RCLCPP_WARN(logger_, "team_min A* found no path");
+        return;
+      }
+      global_path_ = std::move(new_global_path);
+      {
+        std::lock_guard<std::mutex> lock(request_mutex_);
+        // Dynamic VO: replan policy evaluates the stable A* path, not local detours.
+        last_path_ = global_path_;
+      }
+    }
+
+    std::vector<Point3D> path = global_path_;
+    bool vo_active = false;
+    if (request.torpedo_valid && !global_path_.empty()) {
+      const LocalTarget target = selectLocalTarget(
+        request.start, global_path_, config_.dynamic_vo.path_lookahead);
+      BoxObstacle live_torpedo = core_config_.torpedo_barrier;
+      live_torpedo.center = request.torpedo;
+      // Dynamic VO: use one real moving obstacle, not A* prediction boxes.
+      const std::vector<MovingObstacle> moving_obstacles{{
+        live_torpedo, request.torpedo_velocity}};
+      const DynamicVOResult vo = runDynamicVO3D(
+        request.start, request.robot_velocity, target.point, map,
+        moving_obstacles, config_.dynamic_vo);
+      vo_active = vo.avoidance_required;
+      if (vo.avoidance_required) {
+        if (!vo.success || vo.local_path.empty()) {
+          RCLCPP_WARN(logger_, "team_min Dynamic VO found no safe local path");
+          publishStopPath(request.frame_id);
+          return;
+        }
+        path = mergePaths(vo.local_path, global_path_, target.index);
+      }
     }
     if (hit_latched_.load()) {
       return;  // 피격 정지 중에는 낡은 계획 결과를 발행하지 않는다.
@@ -417,11 +534,6 @@ void PlanningModule::execute(const PlanRequest & request)
       path_message.poses.push_back(std::move(pose));
     }
     path_pub_->publish(path_message);
-    {
-      // needsReplan의 충돌·이탈 검사가 최신 경로를 보도록 보관한다.
-      std::lock_guard<std::mutex> lock(request_mutex_);
-      last_path_ = path;
-    }
     publishPoint(current_point_pub_, request.start, request.frame_id);
     publishPoint(goal_point_pub_, request.goal, request.frame_id);
     publishPoint(torpedo_point_pub_, request.torpedo, request.frame_id);
@@ -431,13 +543,14 @@ void PlanningModule::execute(const PlanRequest & request)
     const double calculation_ms = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - calculation_start).count();
     RCLCPP_INFO(
-      logger_, "team_min A* time=%.3f ms, waypoints=%zu, boxes=%zu",
-      calculation_ms, path.size(), obstacles.size());
+      logger_,
+      "team_min hybrid time=%.3f ms, waypoints=%zu, boxes=%zu, Dynamic VO=%s",
+      calculation_ms, path.size(), obstacles.size(), vo_active ? "active" : "clear");
   } catch (const std::exception & error) {
     const double calculation_ms = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - calculation_start).count();
     RCLCPP_ERROR(
-      logger_, "team_min A* failed after %.3f ms: %s",
+      logger_, "team_min hybrid failed after %.3f ms: %s",
       calculation_ms, error.what());
   }
 }

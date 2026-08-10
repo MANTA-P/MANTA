@@ -106,6 +106,8 @@ struct PlanningInput
 struct PlanRequest
 {
   Point3D start;
+  // Dynamic VO: map-frame ROV velocity estimated from odometry positions.
+  Point3D robot_velocity;
   Point3D goal;
   Point3D torpedo;
   // 추정된 어뢰 속도다. 예측 통로 생성에만 쓰고 needsReplan 비교에서는
@@ -132,6 +134,8 @@ struct Decision
 
   bool avoid_mode{false};
   bool mode_changed{false};          // 이번 틱에 NORMAL<->AVOID 전환 발생
+  // Dynamic VO: A* is refreshed only when this flag is true; VO may run every tick.
+  bool global_replan_required{false};
   std::optional<PlanRequest> plan_request;
 
   // 이번 틱에 발생한 이벤트(각각 1회성)

@@ -61,6 +61,8 @@ private:
     const Point3D & torpedo_current);
 
   void updateTorpedoVelocity(const VehicleState & torpedo);
+  // Dynamic VO: estimate ROV velocity in the same frame as planner positions.
+  void updateRobotVelocity(const VehicleState & bluerov);
   void updateEngagement(
     const PlanningInput & input,
     bool torpedo_detected,
@@ -73,6 +75,16 @@ private:
     double now_sec) const;
 
   PlanningCoreConfig config_;
+
+  // Dynamic VO: map-frame ROV velocity estimate.
+  bool have_robot_history_{false};
+  bool have_robot_velocity_{false};
+  std::uint64_t last_robot_sequence_{0};
+  Point3D last_robot_position_{};
+  double last_robot_received_sec_{0.0};
+  double last_robot_stamp_sec_{0.0};
+  std::string last_robot_frame_{};
+  Point3D robot_velocity_{};
 
   // 어뢰 속도 추정(위치 차분 + EMA) 상태
   bool have_torpedo_history_{false};

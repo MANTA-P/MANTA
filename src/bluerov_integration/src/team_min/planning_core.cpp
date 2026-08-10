@@ -249,6 +249,44 @@ void PlanningCore::updateTorpedoVelocity(const VehicleState & torpedo)
   have_torpedo_history_ = true;
 }
 
+// Dynamic VO: position differencing avoids assuming odometry twist frame semantics.
+void PlanningCore::updateRobotVelocity(const VehicleState & bluerov)
+{
+  if (!bluerov.valid ||
+    (have_robot_history_ && bluerov.sequence == last_robot_sequence_))
+  {
+    return;
+  }
+
+  if (have_robot_history_ && bluerov.frame_id == last_robot_frame_) {
+    double dt = bluerov.received_sec - last_robot_received_sec_;
+    if (bluerov.stamp_sec > 0.0 && last_robot_stamp_sec_ > 0.0) {
+      const double message_dt = bluerov.stamp_sec - last_robot_stamp_sec_;
+      if (message_dt > 0.0) {
+        dt = message_dt;
+      }
+    }
+    if (dt > 1.0e-3 && dt < 2.0) {
+      robot_velocity_ = {
+        (bluerov.position.x - last_robot_position_.x) / dt,
+        (bluerov.position.y - last_robot_position_.y) / dt,
+        (bluerov.position.z - last_robot_position_.z) / dt};
+      have_robot_velocity_ = true;
+    } else if (dt >= 2.0) {
+      have_robot_velocity_ = false;
+    }
+  } else {
+    have_robot_velocity_ = false;
+  }
+
+  last_robot_position_ = bluerov.position;
+  last_robot_received_sec_ = bluerov.received_sec;
+  last_robot_stamp_sec_ = bluerov.stamp_sec;
+  last_robot_frame_ = bluerov.frame_id;
+  last_robot_sequence_ = bluerov.sequence;
+  have_robot_history_ = true;
+}
+
 // 교전 상태기계: IDLE -> ENGAGED -> (HIT | AVOIDED) -> IDLE.
 // HIT은 새 미션 목표가 올 때까지 래치되어 계획을 중단시키고,
 // AVOIDED는 회차별(자동추적 U턴 재공격 포함)로 판정된다.
@@ -401,6 +439,8 @@ Decision PlanningCore::update(
 
   // 미션 목표가 아직 없어도 어뢰 속도 추정은 계속 워밍업한다.
   updateTorpedoVelocity(input.torpedo);
+  // Dynamic VO: keep ROV velocity warm even before a mission goal arrives.
+  updateRobotVelocity(input.bluerov);
 
   // 어뢰 탐지: 수신 신선도로 NORMAL/AVOID 모드를 가른다.
   const bool torpedo_detected =
@@ -471,7 +511,9 @@ Decision PlanningCore::update(
   }
 
   const PlanRequest request{
-    start, goal,
+    start,
+    have_robot_velocity_ ? robot_velocity_ : Point3D{},
+    goal,
     torpedo_detected ? input.torpedo.position : Point3D{},
     (torpedo_detected && have_torpedo_velocity_) ?
     torpedo_velocity_ : Point3D{},
@@ -482,6 +524,10 @@ Decision PlanningCore::update(
   if (needsReplan(request, obstacles, last_path, input.now_sec)) {
     last_requested_ = request;
     last_replan_request_sec_ = input.now_sec;
+    decision.global_replan_required = true;
+  }
+  // Dynamic VO: update every detected tick; NORMAL mode only submits A* replans.
+  if (torpedo_detected || decision.global_replan_required) {
     decision.plan_request = request;
   }
   return decision;

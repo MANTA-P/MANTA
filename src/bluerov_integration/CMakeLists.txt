@@ -52,6 +52,7 @@ ament_target_dependencies(bluerov_path_follower
 
 add_library(bluerov_team_min
   src/team_min/astar_planner.cpp
+  src/team_min/dynamic_vo_planner.cpp
   src/team_min/planning_core.cpp
   src/team_min/planning_module.cpp
   src/team_min/rviz_visualizer.cpp

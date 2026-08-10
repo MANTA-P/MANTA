@@ -13,6 +13,7 @@
 #include <rclcpp/rclcpp.hpp>
 
 #include "bluerov_integration/common/data_types.hpp"
+#include "bluerov_integration/team_min/dynamic_vo_planner.hpp"
 #include "bluerov_integration/team_min/planning_core.hpp"
 #include "bluerov_integration/team_min/planning_types.hpp"
 #include "bluerov_integration/team_min/rviz_visualizer.hpp"
@@ -40,6 +41,8 @@ struct PlanningConfig
   double goal_replan_distance{0.1};
   GridMapConfig fixed_map{};
   AStarOptions astar{};
+  // Dynamic VO: local avoidance settings remain inside team_min.
+  DynamicVOOptions dynamic_vo{};
   BoxObstacle torpedo_barrier{};
   PredictionConfig prediction{};
   ReplanPolicyConfig replan{};
@@ -66,6 +69,13 @@ public:
   void stop();
 
 private:
+  // Dynamic VO: one worker item can refresh A* and always update local avoidance.
+  struct PlanningWork
+  {
+    PlanRequest request;
+    bool global_replan_required{false};
+  };
+
   static Point3D positionOf(const nav_msgs::msg::Odometry & odometry);
   static VehicleState toVehicleState(
     const common::ReceivedSample<nav_msgs::msg::Odometry> & sample);
@@ -74,7 +84,7 @@ private:
   void handleDecision(const Decision & decision, const PlanningInput & input);
   void publishStopPath(const std::string & frame_id);
   void workerLoop();
-  void execute(const PlanRequest & request);
+  void execute(const PlanningWork & work);
   void publishPoint(
     const rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr & publisher,
     const Point3D & point,
@@ -96,10 +106,12 @@ private:
 
   mutable std::mutex request_mutex_;
   std::condition_variable request_cv_;
-  std::optional<PlanRequest> pending_request_;
+  std::optional<PlanningWork> pending_request_;
   // 마지막으로 발행한 경로다. worker가 쓰고 update()가 읽으므로
   // request_mutex_ 아래에서만 접근한다(코어에는 복사로 넘긴다).
   std::vector<Point3D> last_path_;
+  // Dynamic VO: worker-owned cached A* path; only complete paths replace it.
+  std::vector<Point3D> global_path_;
   // 코어의 hit 래치 미러다. worker가 낡은 계획 결과의 발행을 억제할 때
   // 읽으므로 atomic으로 둔다.
   std::atomic<bool> hit_latched_{false};
