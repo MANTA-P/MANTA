@@ -5,6 +5,7 @@
 #include <sstream>
 
 #include <geometry_msgs/msg/point.hpp>
+#include <std_msgs/msg/color_rgba.hpp>
 
 namespace bluerov_integration::team_min
 {
@@ -43,9 +44,11 @@ RvizVisualizer::RvizVisualizer(
   const std::string & marker_topic)
 : clock_(node.get_clock())
 {
+  // transient_local이라 depth가 곧 늦게 붙는 RViz가 받는 마커 수다.
+  // 서로 다른 ns/id 마커가 20개를 넘으면 일부가 안 보이므로 여유를 둔다.
   marker_pub_ = node.create_publisher<visualization_msgs::msg::Marker>(
     marker_topic,
-    rclcpp::QoS(rclcpp::KeepLast(20)).reliable().transient_local());
+    rclcpp::QoS(rclcpp::KeepLast(64)).reliable().transient_local());
 }
 
 visualization_msgs::msg::Marker RvizVisualizer::baseMarker(
@@ -219,6 +222,7 @@ void RvizVisualizer::publishTelemetry(
 void RvizVisualizer::publishStatus(
   const std::string & frame_id,
   const Point3D & position,
+  const std::string & planner_name,
   const bool avoid_mode,
   const bool hit_latched,
   const double hit_distance,
@@ -242,7 +246,8 @@ void RvizVisualizer::publishStatus(
     mode.color.b = 0.6F;
   }
   mode.color.a = 1.0F;
-  mode.text = avoid_mode ? "MODE: AVOID" : "MODE: NORMAL";
+  // 어떤 알고리즘으로 도는 중인지 한눈에 보이게 함께 적는다.
+  mode.text = planner_name + " | " + (avoid_mode ? "AVOID" : "NORMAL");
   marker_pub_->publish(mode);
 
   auto event = baseMarker(
@@ -315,40 +320,43 @@ void RvizVisualizer::publishScene(
     marker_pub_->publish(torpedo_center);
   }
 
-  // 0번은 현재 위치 박스(파랑), 1번부터는 예측 통로 박스(연한 시안)다.
-  for (std::size_t index = 0; index < torpedo_obstacles.size(); ++index) {
-    const auto & obstacle = torpedo_obstacles[index];
-    auto barrier = baseMarker(
-      frame_id, "torpedo_barrier", static_cast<int>(index),
-      visualization_msgs::msg::Marker::CUBE);
-    barrier.pose.position.x = obstacle.center.x;
-    barrier.pose.position.y = obstacle.center.y;
-    barrier.pose.position.z = obstacle.center.z;
-    barrier.scale.x = obstacle.size_x;
-    barrier.scale.y = obstacle.size_y;
-    barrier.scale.z = obstacle.size_z;
-    if (index == 0) {
-      barrier.color.b = 1.0F;
-      barrier.color.a = 0.2F;
-    } else {
-      barrier.color.g = 0.7F;
-      barrier.color.b = 1.0F;
-      barrier.color.a = 0.12F;
-    }
-    marker_pub_->publish(barrier);
-  }
+  // 예측 통로 박스는 CUBE_LIST 하나로 묶어 발행한다. 박스마다 마커를
+  // 따로 쏘면 어뢰 탐지 중(execute가 매 틱 도는 구간) 5Hz x 30여 개가
+  // 되어 RViz가 눈에 띄게 느려진다. 모든 박스가 같은 크기라 CUBE_LIST의
+  // 단일 scale로 표현되고, 색은 점별 colors로 준다.
+  // points[0]은 어뢰 현재 위치 박스(파랑), 나머지는 예측 통로(연한 시안).
+  auto barriers = baseMarker(
+    frame_id, "torpedo_barrier", 0,
+    visualization_msgs::msg::Marker::CUBE_LIST);
+  if (torpedo_obstacles.empty()) {
+    // NORMAL 모드: transient_local이라 지우지 않으면 남는다.
+    barriers.action = visualization_msgs::msg::Marker::DELETE;
+  } else {
+    barriers.scale.x = torpedo_obstacles.front().size_x;
+    barriers.scale.y = torpedo_obstacles.front().size_y;
+    barriers.scale.z = torpedo_obstacles.front().size_z;
+    barriers.points.reserve(torpedo_obstacles.size());
+    barriers.colors.reserve(torpedo_obstacles.size());
+    for (std::size_t index = 0; index < torpedo_obstacles.size(); ++index) {
+      geometry_msgs::msg::Point center;
+      center.x = torpedo_obstacles[index].center.x;
+      center.y = torpedo_obstacles[index].center.y;
+      center.z = torpedo_obstacles[index].center.z;
+      barriers.points.push_back(center);
 
-  // 박스 개수가 줄었으면 이전에 그린 잔여 마커를 지운다.
-  for (std::size_t index = torpedo_obstacles.size();
-    index < last_barrier_count_; ++index)
-  {
-    auto stale = baseMarker(
-      frame_id, "torpedo_barrier", static_cast<int>(index),
-      visualization_msgs::msg::Marker::CUBE);
-    stale.action = visualization_msgs::msg::Marker::DELETE;
-    marker_pub_->publish(stale);
+      std_msgs::msg::ColorRGBA color;
+      if (index == 0) {
+        color.b = 1.0F;
+        color.a = 0.2F;
+      } else {
+        color.g = 0.7F;
+        color.b = 1.0F;
+        color.a = 0.12F;
+      }
+      barriers.colors.push_back(color);
+    }
   }
-  last_barrier_count_ = torpedo_obstacles.size();
+  marker_pub_->publish(barriers);
 
   auto arrow = baseMarker(
     frame_id, "goal_arrow", 0, visualization_msgs::msg::Marker::ARROW);

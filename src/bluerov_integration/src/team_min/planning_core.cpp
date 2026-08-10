@@ -126,6 +126,49 @@ GridMapConfig planningMap(
   return map;
 }
 
+// Dynamic VO: choose a forward A* waypoint instead of the mission goal.
+LocalTarget selectLocalTarget(
+  const Point3D & position,
+  const std::vector<Point3D> & path,
+  const double lookahead)
+{
+  std::size_t closest = 0U;
+  double closest_distance = std::numeric_limits<double>::infinity();
+  for (std::size_t index = 0; index < path.size(); ++index) {
+    const double candidate = distance3D(position, path[index]);
+    if (candidate < closest_distance) {
+      closest_distance = candidate;
+      closest = index;
+    }
+  }
+  double accumulated = 0.0;
+  std::size_t target = closest;
+  while (target + 1U < path.size() && accumulated < lookahead) {
+    accumulated += distance3D(path[target], path[target + 1U]);
+    ++target;
+  }
+  return {path[target], target};
+}
+
+// Dynamic VO: reconnect the local avoidance path to the untouched A* suffix.
+std::vector<Point3D> mergePaths(
+  std::vector<Point3D> local_path,
+  const std::vector<Point3D> & global_path,
+  const std::size_t reconnect_index)
+{
+  if (local_path.empty()) {
+    return global_path;
+  }
+  std::size_t suffix = reconnect_index;
+  if (suffix < global_path.size() &&
+    distance3D(local_path.back(), global_path[suffix]) <= 1.0e-6)
+  {
+    ++suffix;
+  }
+  local_path.insert(local_path.end(), global_path.begin() + suffix, global_path.end());
+  return local_path;
+}
+
 PlanningCore::PlanningCore(PlanningCoreConfig config)
 : config_(std::move(config))
 {
@@ -517,7 +560,7 @@ Decision PlanningCore::update(
     torpedo_detected ? input.torpedo.position : Point3D{},
     (torpedo_detected && have_torpedo_velocity_) ?
     torpedo_velocity_ : Point3D{},
-    torpedo_detected, frame_id};
+    torpedo_detected, input.planner, frame_id};
   // 충돌 검사용 통로는 worker의 execute()와 같은 함수로 만들어 판정을
   // 일치시킨다.
   const auto obstacles = buildTorpedoObstacles(request, config_);
@@ -526,9 +569,24 @@ Decision PlanningCore::update(
     last_replan_request_sec_ = input.now_sec;
     decision.global_replan_required = true;
   }
-  // Dynamic VO: update every detected tick; NORMAL mode only submits A* replans.
-  if (torpedo_detected || decision.global_replan_required) {
-    decision.plan_request = request;
+  // 계획을 언제 요청할지는 알고리즘 성격에 따라 다르다.
+  switch (input.planner) {
+    case PlannerType::kAStar:
+      // 격자 탐색은 비싸고 경로가 안정적이라 히스테리시스대로만 돈다.
+      if (decision.global_replan_required) {
+        decision.plan_request = request;
+      }
+      break;
+    case PlannerType::kDynamicVO:
+      // 반응형이라 매 틱 새로 뽑는다(receding-horizon).
+      decision.plan_request = request;
+      break;
+    case PlannerType::kHybrid:
+      // A*는 필요할 때만, DVO는 어뢰가 보이는 동안 매 틱.
+      if (torpedo_detected || decision.global_replan_required) {
+        decision.plan_request = request;
+      }
+      break;
   }
   return decision;
 }

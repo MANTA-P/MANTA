@@ -252,7 +252,9 @@ DynamicVOResult runDynamicVO3D(
   DynamicVOResult result;
   result.avoidance_required =
     collisionRisk(robot_position, robot_velocity, obstacles, options);
-  if (!result.avoidance_required) {
+  // 단독 모드에서는 위험이 없어도 목표까지의 경로를 직접 만들어야 한다
+  // (하이브리드는 위험이 없으면 A* 경로를 그대로 쓰므로 빈 경로 반환).
+  if (!result.avoidance_required && !options.standalone) {
     result.success = true;
     return result;
   }
@@ -295,6 +297,10 @@ DynamicVOResult runDynamicVO3D(
     if (distance3D(position, local_goal) > 1.0e-9) {
       result.local_path.push_back(local_goal);
     }
+    result.success = true;
+  } else if (options.standalone) {
+    // 단독 모드는 먼 목표를 한 번에 못 간다(20스텝 x 0.5s x 3 m/s ~= 30 m).
+    // 다음 틱에 다시 뽑으므로 부분 경로도 유효한 결과다.
     result.success = true;
   }
   return result;

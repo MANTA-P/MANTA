@@ -29,6 +29,10 @@ struct DynamicVOOptions
   int heading_samples{36};
   int vertical_samples{7};
   int speed_samples{5};
+  // true면 A*에 기대지 않고 단독으로 계획한다. 충돌 위험이 없어도 목표를
+  // 향해 롤아웃하고, 목표에 못 닿아도 부분 경로를 성공으로 인정한다
+  // (매 틱 다시 뽑는 receding-horizon). false면 기존 하이브리드 동작.
+  bool standalone{false};
 };
 
 struct DynamicVOResult

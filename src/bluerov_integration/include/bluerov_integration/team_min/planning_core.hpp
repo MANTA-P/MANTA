@@ -39,6 +39,25 @@ GridMapConfig planningMap(
   const std::vector<BoxObstacle> & obstacles,
   const PlanningCoreConfig & config);
 
+// 하이브리드에서 DVO가 향할 국소 목표다. 미션 목표 대신 A* 경로의
+// lookahead 지점을 쓰므로, 회피 후 원래 경로로 돌아올 수 있다.
+struct LocalTarget
+{
+  Point3D point;
+  std::size_t index{0U};
+};
+
+LocalTarget selectLocalTarget(
+  const Point3D & position,
+  const std::vector<Point3D> & path,
+  double lookahead);
+
+// DVO가 만든 국소 우회 경로 뒤에 손대지 않은 A* 잔여 경로를 이어붙인다.
+std::vector<Point3D> mergePaths(
+  std::vector<Point3D> local_path,
+  const std::vector<Point3D> & global_path,
+  std::size_t reconnect_index);
+
 // ---- 매 틱 판단 코어 ----
 // 단일 스레드(계획 타이머) 전용이라 mutex가 없다. last_path는 내부 공유
 // 상태가 아니라 명시적 입력이다(worker가 만든 최신 경로를 어댑터가
