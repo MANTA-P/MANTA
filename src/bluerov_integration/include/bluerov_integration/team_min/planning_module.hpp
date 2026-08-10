@@ -85,6 +85,12 @@ private:
   void publishStopPath(const std::string & frame_id);
   void workerLoop();
   void execute(const PlanningWork & work);
+  // 알고리즘 분기는 여기 안에만 있다. 호출부는 PlanResult만 본다.
+  PlanResult runPlanner(const PlanningWork & work);
+  // 계획 결과를 ROS로 내보낸다(여기부터 PathFollower -> PPID 파이프라인).
+  void publishPlan(const PlanResult & result, const PlanRequest & request);
+  // runPlanner가 돌려준 실패 사유를 ROS 로그로 옮긴다.
+  void reportPlanFailure(PlanFailure failure, const PlanRequest & request);
   void publishPoint(
     const rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr & publisher,
     const Point3D & point,
@@ -103,6 +109,14 @@ private:
   // 판단 코어. planning 타이머(MutuallyExclusive)에서만 update()를
   // 부르므로 잠금 없이 쓴다. planning.enabled=false면 만들지 않는다.
   std::unique_ptr<PlanningCore> core_;
+
+  // 실험 중 재실행 없이 알고리즘을 갈아끼운다:
+  //   ros2 param set /bluerov_integration_node planning.planner dvo
+  // 파라미터 콜백(executor 스레드), 계획 타이머, worker가 함께 보므로
+  // atomic으로 둔다. 콜백 핸들은 살아있어야 콜백이 유지된다.
+  std::atomic<PlannerType> planner_{PlannerType::kHybrid};
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr
+    parameter_callback_;
 
   mutable std::mutex request_mutex_;
   std::condition_variable request_cv_;

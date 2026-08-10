@@ -8,11 +8,36 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "bluerov_integration/team_min/astar_planner.hpp"
 
 namespace bluerov_integration::team_min
 {
+
+// 어떤 알고리즘으로 계획할지다. A*와 DVO를 각각 단독으로 돌려 비교하기
+// 위해 분리했고, kHybrid는 A*(전역) + DVO(국소) 결합이다.
+// 런타임에 바뀌므로(planning.planner 파라미터) config가 아니라 매 틱
+// 입력(PlanningInput)과 요청(PlanRequest)에 실어 나른다.
+enum class PlannerType
+{
+  kAStar,
+  kDynamicVO,
+  kHybrid
+};
+
+inline const char * plannerName(const PlannerType planner)
+{
+  switch (planner) {
+    case PlannerType::kAStar:
+      return "astar";
+    case PlannerType::kDynamicVO:
+      return "dvo";
+    case PlannerType::kHybrid:
+      return "hybrid";
+  }
+  return "unknown";
+}
 
 // 어뢰 진행방향 앞에 예측 박스를 깔아 통로(corridor)를 만드는 설정이다.
 // 어뢰가 예측대로 움직이는 동안 점유 격자가 유지되어 경로가 고정된다.
@@ -100,6 +125,8 @@ struct PlanningInput
   VehicleState bluerov;
   VehicleState torpedo;
   GoalSample goal;
+  // 이번 틱에 선택된 알고리즘이다(런타임에 바뀔 수 있다).
+  PlannerType planner{PlannerType::kHybrid};
 };
 
 // worker 스레드가 실행할 계획 요청이다.
@@ -116,7 +143,36 @@ struct PlanRequest
   // false면 어뢰 미탐지(NORMAL 모드)로, torpedo/torpedo_velocity 값은
   // 무시되고 장애물 없이 계획한다.
   bool torpedo_valid{false};
+  // 이 요청을 처리할 알고리즘이다. 요청이 자기 알고리즘을 들고 다니므로
+  // worker가 계산하는 동안 사용자가 모드를 바꿔도 일관되게 끝난다.
+  PlannerType planner{PlannerType::kHybrid};
   std::string frame_id;
+};
+
+// 모든 플래너의 공통 반환 타입이다. 호출부(execute/publishPlan)는 어떤
+// 알고리즘이 돌았는지 몰라도 되고, 분기는 runPlanner() 안에만 있다.
+// 계획이 실패한 이유다. 순수 계층이 ROS 로거를 부르지 않도록 사유만
+// 돌려주고, 어댑터가 이 값을 보고 로그를 낸다.
+enum class PlanFailure
+{
+  kNone,
+  kGoalInsideBarrier,   // 목표가 어뢰 배리어 안 (어뢰가 지나가면 해소)
+  kStartInsideBarrier,  // 로봇이 어뢰 배리어 안
+  kNoAStarPath,         // A*가 경로를 못 찾음
+  kNoSafeLocalPath      // DVO가 안전한 국소 경로를 못 찾음
+};
+
+struct PlanResult
+{
+  std::vector<Point3D> path;
+  std::vector<BoxObstacle> obstacles;  // RViz 표시용(A* 예측 통로 등)
+  bool valid{false};
+  bool vo_active{false};               // 로그 표시용(DVO가 개입했는가)
+  PlanFailure failure{PlanFailure::kNone};
+  // 계획 실패가 "갈 곳이 없다"는 뜻이라 정지시켜야 하는 경우다.
+  // (회피 경로를 못 찾은 상황. A*가 한 번 실패한 것과는 구분한다 —
+  //  그때는 기존 경로를 유지하고 다음 틱에 재시도한다.)
+  bool stop_requested{false};
 };
 
 // 매 틱 판단 결과다. 판단은 코어가 하고, 행동(발행·로그·마커)은
