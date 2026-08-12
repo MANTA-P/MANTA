@@ -8,12 +8,13 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
-find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 
 add_executable(torpedo_control_node_v2
+  src/default_control_config.cpp
   src/ros_interface.cpp
   src/torpedo_control_node.cpp
+  src/util/tick_tock.cpp
 )
 
 target_include_directories(torpedo_control_node_v2 PUBLIC include)
@@ -22,7 +23,6 @@ target_compile_features(torpedo_control_node_v2 PUBLIC cxx_std_17)
 ament_target_dependencies(torpedo_control_node_v2
   nav_msgs
   rclcpp
-  sensor_msgs
   std_msgs
 )
 

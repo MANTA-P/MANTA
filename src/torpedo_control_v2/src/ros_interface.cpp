@@ -56,15 +56,6 @@ RosInterface::RosInterface() : Node("torpedo_control_node_v2")
             }
         });
 
-    joint_states_sub_ = create_subscription<sensor_msgs::msg::JointState>(
-        "/torpedo/state/joint_states",
-        rclcpp::SensorDataQoS(),
-        [this](const sensor_msgs::msg::JointState::SharedPtr message) {
-            if (message) {
-                on_joint_states(*message);
-            }
-        });
-
     thrust_pub_ = create_publisher<std_msgs::msg::Float64>("/torpedo/actuators/thruster/command", 10);
     fin_top_pub_ = create_publisher<std_msgs::msg::Float64>("/torpedo/actuators/fins/top/command", 10);
     fin_bottom_pub_ = create_publisher<std_msgs::msg::Float64>("/torpedo/actuators/fins/bottom/command", 10);
@@ -112,8 +103,22 @@ bool RosInterface::ok() const
 
 SensorData RosInterface::latest_sensor_data() const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return latest_data_;
+    SensorData snapshot;
+    long long torpedo_odometry_age_us;
+    long long target_odometry_age_us;
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        snapshot = latest_data_;
+        torpedo_odometry_age_us = torpedo_odometry_timer_.tock();
+        target_odometry_age_us = target_odometry_timer_.tock();
+    }
+
+    // Timeout values are in microseconds.
+    snapshot.torpedo_odometry.valid &= torpedo_odometry_age_us <= 30'000;
+    snapshot.target_odometry.valid &= target_odometry_age_us <= 30'000;
+
+    return snapshot;
 }
 
 void RosInterface::publish_command(const ActuatorCommand & command)
@@ -131,21 +136,12 @@ void RosInterface::on_torpedo_odometry(const nav_msgs::msg::Odometry & message)
 {
     std::lock_guard<std::mutex> lock(mutex_);
     latest_data_.torpedo_odometry = convert_odometry(message);
+    torpedo_odometry_timer_.tick();
 }
 
 void RosInterface::on_target_odometry(const nav_msgs::msg::Odometry & message)
 {
     std::lock_guard<std::mutex> lock(mutex_);
     latest_data_.target_odometry = convert_odometry(message);
-}
-
-void RosInterface::on_joint_states(const sensor_msgs::msg::JointState & message)
-{
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto & data = latest_data_.joint_states;
-    data.valid = true;
-    data.names.assign(message.name.begin(), message.name.end());
-    data.positions.assign(message.position.begin(), message.position.end());
-    data.velocities.assign(message.velocity.begin(), message.velocity.end());
-    data.efforts.assign(message.effort.begin(), message.effort.end());
+    target_odometry_timer_.tick();
 }

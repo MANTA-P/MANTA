@@ -1,8 +1,5 @@
 #pragma once
 
-#include <string>
-#include <vector>
-
 struct OdometryData
 {
     bool valid{false};
@@ -25,20 +22,10 @@ struct OdometryData
     double angular_z{0.0};
 };
 
-struct JointStateData
-{
-    bool valid{false};
-    std::vector<std::string> names;
-    std::vector<double> positions;
-    std::vector<double> velocities;
-    std::vector<double> efforts;
-};
-
 struct SensorData
 {
     OdometryData torpedo_odometry;
     OdometryData target_odometry;
-    JointStateData joint_states;
 };
 
 struct ActuatorCommand
