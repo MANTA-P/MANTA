@@ -23,7 +23,7 @@ int main(int argc, char * argv[])
     while (ros_interface->ok()) {
         const auto data = ros_interface->latest_sensor_data();
 
-        if (data.torpedo_odometry.valid) {
+        if (!data.torpedo_odometry.valid) {
             std::cout << "torpedo failed" << std::endl;
         }
 
