@@ -17,6 +17,8 @@ struct ControlConfig
     float roll_kp;
     float roll_kd;
     float roll_limit_rad;
+    float png_navigation_constant;
+    float png_acceleration_to_fin_gain;
 };
 
 ControlConfig make_default_control_config() noexcept;

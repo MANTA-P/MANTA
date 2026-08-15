@@ -79,7 +79,7 @@ int main(int argc, char * argv[])
 #ifdef __linux__
         if (status_ticktock.tock() >= 100000) {
             status_ticktock.tick();
-            torpedo_control_v2::cli_display(current_mode, sensor_data, actuator_command, config.fin_limit_rad, config.thrust_max);
+            torpedo_control_v2::cli_display(current_mode, sensor_data, actuator_command, config.fin_limit_rad, config.thrust_max, png_controller.guidance_mode_name(), png_controller.closing_speed());
         }
 #endif
     }

@@ -18,6 +18,8 @@ ControlConfig make_default_control_config() noexcept
         0.60F,
         0.15F,
         0.10F,
+        3.0F,
+        1.0F,
     };
 }
 

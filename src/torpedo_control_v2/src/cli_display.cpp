@@ -352,7 +352,7 @@ void print_fin_view(const ActuatorCommand & command, const double fin_limit_rad)
 namespace torpedo_control_v2
 {
 
-void cli_display(const ControlMode mode, const SensorData & sensor_data, const ActuatorCommand & actuator_command, const double fin_limit_rad, const double thrust_max)
+void cli_display(const ControlMode mode, const SensorData & sensor_data, const ActuatorCommand & actuator_command, const double fin_limit_rad, const double thrust_max, const char * png_guidance_mode, const double png_closing_speed)
 {
     const char escape = static_cast<char>(27);
     const bool stopped = actuator_command.thrust == 0.0;
@@ -366,6 +366,10 @@ void cli_display(const ControlMode mode, const SensorData & sensor_data, const A
     std::cout << " STATE   : " << escape << (stopped ? "[93m" : "[92m") << (stopped ? "STANDBY" : "RUNNING") << escape << "[0m" << std::endl;
     std::cout << " SENSOR  : TORPEDO " << escape << (sensor_data.torpedo_odometry.valid ? "[92m" : "[91m") << "[" << (sensor_data.torpedo_odometry.valid ? "OK" : "FAIL") << "]" << escape << "[0m";
     std::cout << "  TARGET " << escape << (sensor_data.target_odometry.valid ? "[92m" : "[91m") << "[" << (sensor_data.target_odometry.valid ? "OK" : "FAIL") << "]" << escape << "[0m" << std::endl;
+    if (mode == ControlMode::PNG && !stopped) {
+        std::cout << " GUIDANCE: " << escape << (png_closing_speed > 0.0 ? "[92m" : "[93m") << png_guidance_mode << escape << "[0m";
+        std::cout << " | CLOSING: " << png_closing_speed << " m/s" << std::endl;
+    }
 
     if (stopped) {
         std::cout << "---------------------------------------------------" << std::endl;
