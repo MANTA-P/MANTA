@@ -38,6 +38,8 @@ std::shared_ptr<RosInterface> RosInterface::create(int argc, char * argv[])
 
 RosInterface::RosInterface() : Node("torpedo_control_node_v2")
 {
+    torpedo_tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+
     torpedo_odometry_sub_ = create_subscription<nav_msgs::msg::Odometry>(
         "/torpedo/state/odometry",
         rclcpp::SensorDataQoS(),
@@ -134,9 +136,21 @@ void RosInterface::publish_command(const ActuatorCommand & command)
 
 void RosInterface::on_torpedo_odometry(const nav_msgs::msg::Odometry & message)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-    latest_data_.torpedo_odometry = convert_odometry(message);
-    torpedo_odometry_timer_.tick();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        latest_data_.torpedo_odometry = convert_odometry(message);
+        torpedo_odometry_timer_.tick();
+    }
+
+    geometry_msgs::msg::TransformStamped transform;
+    transform.header.stamp = message.header.stamp;
+    transform.header.frame_id = "map";
+    transform.child_frame_id = "torpedo_base_link";
+    transform.transform.translation.x = message.pose.pose.position.x;
+    transform.transform.translation.y = message.pose.pose.position.y;
+    transform.transform.translation.z = message.pose.pose.position.z;
+    transform.transform.rotation = message.pose.pose.orientation;
+    torpedo_tf_broadcaster_->sendTransform(transform);
 }
 
 void RosInterface::on_target_odometry(const nav_msgs::msg::Odometry & message)

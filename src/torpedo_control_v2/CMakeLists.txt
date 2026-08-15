@@ -6,9 +6,11 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
 
 add_executable(torpedo_control_node_v2
   src/actuator_mixer.cpp
@@ -34,8 +36,10 @@ target_compile_features(torpedo_control_node_v2 PUBLIC cxx_std_17)
 
 ament_target_dependencies(torpedo_control_node_v2
   nav_msgs
+  geometry_msgs
   rclcpp
   std_msgs
+  tf2_ros
 )
 
 install(TARGETS torpedo_control_node_v2

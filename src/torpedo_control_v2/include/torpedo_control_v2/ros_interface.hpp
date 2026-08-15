@@ -4,9 +4,11 @@
 #include <mutex>
 #include <thread>
 
+#include "geometry_msgs/msg/transform_stamped.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/float64.hpp"
+#include "tf2_ros/transform_broadcaster.h"
 
 #include "torpedo_control_v2/types.hpp"
 #include "torpedo_control_v2/util/tick_tock.hpp"
@@ -37,6 +39,7 @@ private:
 
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr torpedo_odometry_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr target_odometry_sub_;
+    std::unique_ptr<tf2_ros::TransformBroadcaster> torpedo_tf_broadcaster_;
 
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr thrust_pub_;
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr fin_top_pub_;
