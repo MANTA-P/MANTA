@@ -1,7 +1,9 @@
 #include <chrono>
-#include <iostream>
 #include <memory>
 #include <thread>
+#ifdef __linux__
+#include "torpedo_control_v2/cli_display.hpp"
+#endif
 
 #include "torpedo_control_v2/control_config.hpp"
 #include "torpedo_control_v2/control_core.hpp"
@@ -33,7 +35,9 @@ int main(int argc, char * argv[])
 
     // timer init
     torpedo_control_v2::util::TickTock control_ticktock;
+#ifdef __linux__
     torpedo_control_v2::util::TickTock status_ticktock;
+#endif
     const long long control_period_us = 1'000'000 / config.update_rate_hz;
     ControlMode current_mode{ControlMode::None};
     torpedo_control_v2::ModeController *current_controller = nullptr;
@@ -72,10 +76,12 @@ int main(int argc, char * argv[])
 
         ros_interface->publish_command(actuator_command);
 
-        if (status_ticktock.tock() >= 500'000) {
+#ifdef __linux__
+        if (status_ticktock.tock() >= 100000) {
             status_ticktock.tick();
-            std::cout << "mode: " << keyboard_input.mode_name() << " | torpedo: " << (sensor_data.torpedo_odometry.valid ? "OK" : "FAIL") << " | target: " << (sensor_data.target_odometry.valid ? "OK" : "FAIL") << " | speed +Y: " << sensor_data.torpedo_odometry.linear_y << " | thrust: " << actuator_command.thrust << " | fins T/B/L/R: " << actuator_command.fin_top << "/" << actuator_command.fin_bottom << "/" << actuator_command.fin_left << "/" << actuator_command.fin_right << std::endl;
+            torpedo_control_v2::cli_display(current_mode, sensor_data, actuator_command, config.fin_limit_rad, config.thrust_max);
         }
+#endif
     }
 
     // end

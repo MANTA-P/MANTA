@@ -25,6 +25,10 @@ add_executable(torpedo_control_node_v2
   src/util/vector3.cpp
 )
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_sources(torpedo_control_node_v2 PRIVATE src/cli_display.cpp)
+endif()
+
 target_include_directories(torpedo_control_node_v2 PUBLIC include)
 target_compile_features(torpedo_control_node_v2 PUBLIC cxx_std_17)
 

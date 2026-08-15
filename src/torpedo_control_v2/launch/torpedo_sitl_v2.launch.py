@@ -29,6 +29,7 @@ def generate_launch_description():
         name='torpedo_control_node_v2',
         output='screen',
         emulate_tty=True,
+        output_format="{line}",
         parameters=[{'use_sim_time': use_sim_time}],
     )
 
