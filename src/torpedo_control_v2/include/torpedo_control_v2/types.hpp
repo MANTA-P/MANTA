@@ -28,6 +28,13 @@ struct SensorData
     OdometryData target_odometry;
 };
 
+struct ControlDemand
+{
+    double thrust{0.0};
+    double pitch_rad{0.0};
+    double yaw_rad{0.0};
+};
+
 struct ActuatorCommand
 {
     double thrust{0.0};
@@ -35,4 +42,24 @@ struct ActuatorCommand
     double fin_bottom{0.0};
     double fin_left{0.0};
     double fin_right{0.0};
+};
+
+enum class ControlMode
+{
+    None,
+    Keyboard,
+    SimpleTracking,
+    PNG
+};
+
+enum class InputCommand
+{
+    None,
+    ThrottleUp,
+    ThrottleDown,
+    ThrottleStop,
+    PitchUp,
+    PitchDown,
+    YawLeft,
+    YawRight
 };

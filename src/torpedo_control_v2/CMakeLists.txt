@@ -11,10 +11,18 @@ find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 
 add_executable(torpedo_control_node_v2
+  src/actuator_mixer.cpp
+  src/control_core.cpp
   src/default_control_config.cpp
+  src/keyboard_controller.cpp
+  src/keyboard_input.cpp
+  src/png_controller.cpp
   src/ros_interface.cpp
+  src/roll_controller.cpp
+  src/simple_tracking_controller.cpp
   src/torpedo_control_node.cpp
   src/util/tick_tock.cpp
+  src/util/vector3.cpp
 )
 
 target_include_directories(torpedo_control_node_v2 PUBLIC include)

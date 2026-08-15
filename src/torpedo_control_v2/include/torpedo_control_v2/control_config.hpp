@@ -11,6 +11,12 @@ struct ControlConfig
     float thrust_max;
     float pitch_step_rad;
     float yaw_step_rad;
+    float fin_limit_rad;
+    float simple_tracking_pitch_kp;
+    float simple_tracking_yaw_kp;
+    float roll_kp;
+    float roll_kd;
+    float roll_limit_rad;
 };
 
 ControlConfig make_default_control_config() noexcept;
