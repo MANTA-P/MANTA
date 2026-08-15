@@ -34,6 +34,7 @@ public:
   double saturation;
   gz::sim::EntityComponentManager * ecm = nullptr;
   std::chrono::steady_clock::duration lastMeasurementTime{0};
+  std::chrono::milliseconds measurementPeriod{20};  // 50 Hz
   bool estimateDepth;
   double standardPressure = 101.325;
   double kPaPerM = 9.80638;
@@ -212,6 +213,12 @@ void SubseaPressureSensorPlugin::PreUpdate(
 void SubseaPressureSensorPlugin::PostUpdate(
   const gz::sim::UpdateInfo & _info, const gz::sim::EntityComponentManager & _ecm)
 {
+  if (_info.paused || _info.simTime - this->dataPtr->lastMeasurementTime <
+      this->dataPtr->measurementPeriod)
+  {
+    return;
+  }
+
   this->dataPtr->lastMeasurementTime = _info.simTime;
 
   // Publishing Sea_Pressure and depth estimate on gazebo topic
