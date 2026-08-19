@@ -522,11 +522,6 @@
     </plugin>
 
     <plugin
-      filename="gz-sim-imu-system"
-      name="gz::sim::systems::Imu">
-    </plugin>
-
-    <plugin
       filename="gz-sim-navsat-system"
       name="gz::sim::systems::NavSat">
     </plugin>
@@ -538,24 +533,6 @@
       <robot_base_frame>base_link</robot_base_frame>
       <dimensions>3</dimensions>
       <odom_publish_frequency>100</odom_publish_frequency>
-    </plugin>
-
-    <plugin
-      filename="gz-sim-joint-state-publisher-system"
-      name="gz::sim::systems::JointStatePublisher">
-    </plugin>
-
-    <!-- Sea Pressure Sensor Plugin -->
-    <plugin
-      filename="sea_pressure_sensor"
-      name=" dave_gz_sensor_plugins::SubseaPressureSensorPlugin">
-      <namespace>glider_slocum</namespace>
-      <topic>sea_pressure</topic>
-      <update_rate>10</update_rate>
-      <noise_sigma>3.0</noise_sigma>
-      <estimate_depth_on>true</estimate_depth_on>
-      <standard_pressure>101.325</standard_pressure>
-      <kPa_per_meter>9.80638</kPa_per_meter>
     </plugin>
 
   </model>

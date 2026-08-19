@@ -42,16 +42,9 @@
   gz_type_name: "gz.msgs.Double"
   direction: ROS_TO_GZ
 
-# State topics used by the CSV logger.
+# 어뢰 Odometry
 - ros_topic_name: "/torpedo/state/odometry"
   gz_topic_name: "/model/glider_slocum/odometry"
   ros_type_name: "nav_msgs/msg/Odometry"
   gz_type_name: "gz.msgs.Odometry"
-  direction: GZ_TO_ROS
-
-# dave_ocean_waves.world has the internal Gazebo world name "oceans_waves".
-- ros_topic_name: "/torpedo/state/joint_states"
-  gz_topic_name: "/world/oceans_waves/model/glider_slocum/joint_state"
-  ros_type_name: "sensor_msgs/msg/JointState"
-  gz_type_name: "gz.msgs.Model"
   direction: GZ_TO_ROS
