@@ -3,25 +3,22 @@
 <package format="3">
   <name>torpedo_control_v2</name>
   <version>0.1.0</version>
-  <description>Thread-safe v2 torpedo controller with asynchronous keyboard input and CSV logging.</description>
+  <description>Minimal ROS 2 sensor interface for torpedo control experiments.</description>
 
   <maintainer email="user@example.com">user</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
+  <depend>geometry_msgs</depend>
   <depend>rclcpp</depend>
   <depend>nav_msgs</depend>
-  <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
+  <depend>tf2_ros</depend>
 
-  <exec_depend>ament_index_python</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>ros_gz_bridge</exec_depend>
-
-  <test_depend>ament_lint_auto</test_depend>
-  <test_depend>ament_lint_common</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>
