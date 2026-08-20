@@ -143,8 +143,9 @@ MANTA 설치 및 실행 도구
   help                            이 도움말 표시
 
 시뮬레이션 실행:
-  bluerov [Z | X Y Z]
+  bluerov [--gui] [Z | X Y Z]
       BlueROV와 Gazebo 실행
+      기본은 GUI 없이 실행하고 --gui를 주면 Gazebo GUI 실행
       인자가 없으면 기존 기본 위치와 Z=-0.5 사용
       숫자 1개는 Z, 숫자 3개는 X Y Z로 사용
 
@@ -172,8 +173,9 @@ MANTA 설치 및 실행 도구
 
 예:
   manta1
+  manta1 --gui
   manta1 -1.0
-  manta1 5 3 -1.0
+  manta1 5 3 -1.0 --gui
   manta2 -40 -10 -8
   manta4
   manta4 10 0 -0.5
@@ -353,28 +355,40 @@ command_bluerov() {
   local x=""
   local y=""
   local z="-0.5"
+  local headless="true"
+  local argument
+  local -a position_values=()
   local -a position_arguments=()
 
-  case "$#" in
+  for argument in "$@"; do
+    case "$argument" in
+      --gui) headless="false" ;;
+      --*) fail "알 수 없는 manta1 옵션: $argument" ;;
+      *) position_values+=("$argument") ;;
+    esac
+  done
+
+  case "${#position_values[@]}" in
     0) ;;
     1)
-      z="$1"
+      z="${position_values[0]}"
       ;;
     3)
-      x="$1"
-      y="$2"
-      z="$3"
+      x="${position_values[0]}"
+      y="${position_values[1]}"
+      z="${position_values[2]}"
       require_number "X" "$x"
       require_number "Y" "$y"
       position_arguments=("x:=$x" "y:=$y")
       ;;
-    *) fail "사용법: manta1 [Z | X Y Z]" ;;
+    *) fail "사용법: manta1 [--gui] [Z | X Y Z]" ;;
   esac
   require_number "Z" "$z"
 
   load_ros_environment
   exec ros2 launch dave_demos dave_robot.launch.py \
-    headless:=false \
+    gui:=true \
+    headless:="$headless" \
     "${position_arguments[@]}" \
     z:="$z" \
     namespace:=bluerov2 \
