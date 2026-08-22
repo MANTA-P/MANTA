@@ -2,6 +2,7 @@
 build/
 install/
 log/
+ppid_logs/
 
 # --- C++ / Python 빌드 및 캐시 ---
 *.o
