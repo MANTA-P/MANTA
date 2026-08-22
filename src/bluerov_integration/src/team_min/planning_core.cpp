@@ -564,6 +564,12 @@ Decision PlanningCore::update(
   // 충돌 검사용 통로는 worker의 execute()와 같은 함수로 만들어 판정을
   // 일치시킨다.
   const auto obstacles = buildTorpedoObstacles(request, config_);
+  // 통로 시각화는 계획과 분리한다. A*는 재계획이 드물어(충돌 때만) 계획
+  // 결과에만 실어 보내면 마커가 옛 어뢰 위치에 얼어붙는다. DVO 단독은
+  // 어뢰를 움직이는 물체로 직접 다뤄 통로를 쓰지 않으므로 그리지 않는다.
+  if (input.planner != PlannerType::kDynamicVO) {
+    decision.torpedo_corridor = obstacles;
+  }
   if (needsReplan(request, obstacles, last_path, input.now_sec)) {
     last_requested_ = request;
     last_replan_request_sec_ = input.now_sec;

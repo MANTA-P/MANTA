@@ -279,37 +279,19 @@ void RvizVisualizer::publishStatus(
   marker_pub_->publish(event);
 }
 
-void RvizVisualizer::publishScene(
+// 예측 통로는 계획 결과가 아니라 매 틱의 어뢰 상태를 그린다. A*는 충돌
+// 때만 재계획하므로(측정상 한 판에 1회) 계획 결과에 실어 보내면 어뢰가
+// 계속 움직이는 동안 박스가 옛 위치에 그대로 남는다.
+void RvizVisualizer::publishTorpedoCorridor(
   const std::string & frame_id,
-  const Point3D & current,
-  const Point3D & goal,
-  const std::vector<BoxObstacle> & torpedo_obstacles,
-  const std::vector<Point3D> & path)
+  const std::vector<BoxObstacle> & torpedo_obstacles)
 {
-  auto robot = baseMarker(
-    frame_id, "uuv_position", 0, visualization_msgs::msg::Marker::SPHERE);
-  robot.pose.position.x = current.x;
-  robot.pose.position.y = current.y;
-  robot.pose.position.z = current.z;
-  robot.scale.x = robot.scale.y = robot.scale.z = 0.5;
-  robot.color.g = 1.0F;
-  robot.color.a = 0.9F;
-  marker_pub_->publish(robot);
-
-  auto goal_marker = baseMarker(
-    frame_id, "astar_goal", 0, visualization_msgs::msg::Marker::SPHERE);
-  goal_marker.pose.position.x = goal.x;
-  goal_marker.pose.position.y = goal.y;
-  goal_marker.pose.position.z = goal.z;
-  goal_marker.scale.x = goal_marker.scale.y = goal_marker.scale.z = 0.8;
-  goal_marker.color.r = 1.0F;
-  goal_marker.color.a = 1.0F;
-  marker_pub_->publish(goal_marker);
-
-  if (!torpedo_obstacles.empty()) {
+  auto torpedo_center = baseMarker(
+    frame_id, "torpedo_center", 0, visualization_msgs::msg::Marker::SPHERE);
+  if (torpedo_obstacles.empty()) {
+    torpedo_center.action = visualization_msgs::msg::Marker::DELETE;
+  } else {
     const auto & live = torpedo_obstacles.front();
-    auto torpedo_center = baseMarker(
-      frame_id, "torpedo_center", 0, visualization_msgs::msg::Marker::SPHERE);
     torpedo_center.pose.position.x = live.center.x;
     torpedo_center.pose.position.y = live.center.y;
     torpedo_center.pose.position.z = live.center.z;
@@ -317,19 +299,19 @@ void RvizVisualizer::publishScene(
       torpedo_center.scale.z = 0.5;
     torpedo_center.color.b = 1.0F;
     torpedo_center.color.a = 1.0F;
-    marker_pub_->publish(torpedo_center);
   }
+  marker_pub_->publish(torpedo_center);
 
   // 예측 통로 박스는 CUBE_LIST 하나로 묶어 발행한다. 박스마다 마커를
-  // 따로 쏘면 어뢰 탐지 중(execute가 매 틱 도는 구간) 5Hz x 30여 개가
-  // 되어 RViz가 눈에 띄게 느려진다. 모든 박스가 같은 크기라 CUBE_LIST의
-  // 단일 scale로 표현되고, 색은 점별 colors로 준다.
-  // points[0]은 어뢰 현재 위치 박스(파랑), 나머지는 예측 통로(연한 시안).
+  // 따로 쏘면 어뢰 탐지 중 5Hz x 30여 개가 되어 RViz가 눈에 띄게 느려진다.
+  // 모든 박스가 같은 크기라 CUBE_LIST의 단일 scale로 표현되고, 색은 점별
+  // colors로 준다. points[0]은 어뢰 현재 위치 박스(파랑), 나머지는 예측
+  // 통로(연한 시안)다.
   auto barriers = baseMarker(
     frame_id, "torpedo_barrier", 0,
     visualization_msgs::msg::Marker::CUBE_LIST);
   if (torpedo_obstacles.empty()) {
-    // NORMAL 모드: transient_local이라 지우지 않으면 남는다.
+    // NORMAL 모드나 DVO 단독: transient_local이라 지우지 않으면 남는다.
     barriers.action = visualization_msgs::msg::Marker::DELETE;
   } else {
     barriers.scale.x = torpedo_obstacles.front().size_x;
@@ -357,6 +339,33 @@ void RvizVisualizer::publishScene(
     }
   }
   marker_pub_->publish(barriers);
+}
+
+void RvizVisualizer::publishScene(
+  const std::string & frame_id,
+  const Point3D & current,
+  const Point3D & goal,
+  const std::vector<Point3D> & path)
+{
+  auto robot = baseMarker(
+    frame_id, "uuv_position", 0, visualization_msgs::msg::Marker::SPHERE);
+  robot.pose.position.x = current.x;
+  robot.pose.position.y = current.y;
+  robot.pose.position.z = current.z;
+  robot.scale.x = robot.scale.y = robot.scale.z = 0.5;
+  robot.color.g = 1.0F;
+  robot.color.a = 0.9F;
+  marker_pub_->publish(robot);
+
+  auto goal_marker = baseMarker(
+    frame_id, "astar_goal", 0, visualization_msgs::msg::Marker::SPHERE);
+  goal_marker.pose.position.x = goal.x;
+  goal_marker.pose.position.y = goal.y;
+  goal_marker.pose.position.z = goal.z;
+  goal_marker.scale.x = goal_marker.scale.y = goal_marker.scale.z = 0.8;
+  goal_marker.color.r = 1.0F;
+  goal_marker.color.a = 1.0F;
+  marker_pub_->publish(goal_marker);
 
   auto arrow = baseMarker(
     frame_id, "goal_arrow", 0, visualization_msgs::msg::Marker::ARROW);

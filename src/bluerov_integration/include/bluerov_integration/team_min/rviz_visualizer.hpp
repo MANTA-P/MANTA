@@ -28,11 +28,14 @@ public:
     bool show_barrier);
   void publishTelemetry(const common::StateSnapshot & snapshot);
   // torpedo_obstacles[0]은 어뢰 현재 위치 박스, 나머지는 예측 통로 박스다.
+  // 계획 주기가 아니라 상태 갱신 주기(5Hz)마다 불러야 어뢰를 따라간다.
+  void publishTorpedoCorridor(
+    const std::string & frame_id,
+    const std::vector<BoxObstacle> & torpedo_obstacles);
   void publishScene(
     const std::string & frame_id,
     const Point3D & current,
     const Point3D & goal,
-    const std::vector<BoxObstacle> & torpedo_obstacles,
     const std::vector<Point3D> & path);
   // 선택된 플래너, NORMAL/AVOID 모드, 교전 결과(HIT/AVOIDED)를
   // ROV 위 텍스트로 표시한다.

@@ -74,6 +74,27 @@ ESP32 이식 범위가 늘었다.
   (PathFollower가 경로 끝을 "미션 목표 도달"로 오판해 회피를 무시하는 것 방지)
 - 하이브리드에서 DVO 실패 시 정지하는 기존 동작 보존
 
+### 1-8. 예측 통로 박스가 어뢰를 안 따라가던 문제
+
+한 번 회피하고 나면 어뢰는 계속 움직이는데 **예측 박스가 그 자리에 얼어붙었다.**
+
+원인: 박스를 그리는 `publishScene()`이 `publishPlan()` 안에서만 불렸다.
+A*는 히스테리시스 정책상 **충돌할 때만 재계획**한다(측정상 한 판에 1회).
+회피 경로를 한 번 잡으면 더는 계획이 돌지 않으므로 그릴 기회 자체가 없었다.
+마커 QoS가 `transient_local`이라 옛 박스가 지워지지도 않고 남았다.
+
+→ 통로 그리기를 계획에서 떼어냈다.
+
+| | 전 | 후 |
+|---|---|---|
+| 박스 갱신 시점 | 계획 성공 시 (A*는 1회) | 상태 갱신마다 (5Hz) |
+| 코어 | 통로를 충돌검사용으로만 씀 | 같은 결과를 `Decision.torpedo_corridor`로 함께 넘김 |
+| 시각화 | `publishScene()` 안 | `publishTorpedoCorridor()` 분리 |
+
+코어가 이미 `needsReplan` 충돌검사용으로 매 틱 만들던 통로를 그대로 실어 보내므로
+**계산은 늘지 않는다.** DVO 단독은 어뢰를 움직이는 물체로 직접 다뤄 통로를 쓰지
+않으므로 그리지 않는다(빈 값 → DELETE로 지움).
+
 ---
 
 ## 2. 실험 자동화 도구 (저장소 밖, `~/manta_experiments/`)
@@ -147,11 +168,83 @@ python3 -c "import pexpect" || pip3 install pexpect
 manta_rebuild
 ```
 
-### 자동 실험 (사람 손 없이)
+### 한 판씩 골라서 (가장 쉬움)
+
+인자 없이 실행하면 방향·알고리즘·어뢰모드·속도를 차례로 물어본다.
+좌표나 추력 횟수를 외울 필요가 없다.
 
 ```bash
 cd ~/manta_experiments
+./auto_run.py
+```
 
+```
+1. 어뢰가 오는 방향
+  1) front    정면충돌 접근15m/s
+  2) rear     후방추격 접근9m/s
+  3) side     측면횡단
+  4) diag     대각접근
+선택 [1-4] > 2
+
+2. 회피 알고리즘
+  1) astar    A* 전역경로 (충돌 때만 재계획)
+  2) dvo      Dynamic VO 반응회피 (매 틱 재계산)
+  3) hybrid   A* 경로 + 위험하면 DVO 국소회피
+선택 [1-3] > 1
+
+3. 어뢰 유도 모드
+  1) 모드2     SimpleTracking
+  2) 모드3     PNG
+선택 [1-2] > 2
+
+4. 어뢰 속도
+  1) slow     6.5 m/s (12.7 kt)
+  2) mid      8.5 m/s (16.5 kt)
+  3) fast     12.2 m/s (23.7 kt)  ← 기본
+선택 [1-3, Enter=기본] >
+
+→ rear / astar / 모드3(PNG) / fast(12.2 m/s (23.7 kt))
+```
+
+속도는 **Enter만 치면 가장 빠른 `fast`**로 간다. 이미 정한 항목은 인자로 미리
+주면 그것만 건너뛴다 — `./auto_run.py rear` 하면 방향은 안 묻는다.
+
+### 48회 한 판씩 보며 판정 (`--step`)
+
+전체 조합을 한 판씩 돌리되, **매 판 끝날 때 멈춰서 RViz를 보고 직접 판정·메모**한다.
+자동 판정이 틀렸다고 보이면 그 자리에서 고칠 수 있다.
+
+```bash
+./auto_run.py --step                # 48개 조합
+./auto_run.py --step --speed fast   # 16개만
+./auto_run.py --step rear           # rear 방향만 12개
+./auto_run.py --step rear dvo       # rear + dvo만 6개
+```
+
+한 판이 끝나면 이렇게 묻는다:
+
+```
+[3/48] rear / astar / 모드3(PNG) / fast(12.2 m/s (23.7 kt))
+자동판정: HIT (최근접 0.94 m, 계획 1회)
+
+  Enter  자동판정대로 기록하고 다음
+  a      AVOIDED로 정정
+  h      HIT으로 정정
+  r      이 판 다시 실행
+  s      건너뛰기(기록 안 함)
+  q      중단 (다음에 이어서)
+```
+
+- `q`로 중단해도 다시 `--step`을 실행하면 **남은 조합부터 이어진다**.
+  처음부터 다시 하려면 `--restart`.
+- 매 판 즉시 `results/step_results.csv`에 append 하므로 중간에 죽어도 앞선 결과는 남는다.
+- `./auto_run.py --summary`에 판정·메모가 함께 나오고, 자동판정을 고친 판은 `*`로 표시된다.
+
+대화형 입력이 필요하므로 **본인 터미널에서 직접** 실행해야 한다(백그라운드 불가).
+
+### 자동 실험 (사람 손 없이)
+
+```bash
 # 한 판: 시나리오 / 플래너 / 어뢰모드 / 속도
 ./auto_run.py rear astar 3 --speed fast
 
@@ -169,14 +262,17 @@ cd ~/manta_experiments
 
 | 인자 | 값 | 뜻 |
 |---|---|---|
-| 시나리오 | `front` `rear` `side` `diag` | 어뢰가 오는 방향 |
-| 플래너 | `astar` `dvo` | 회피 알고리즘 |
+| 시나리오 | `front` `rear` `side` `diag` | 어뢰가 오는 방향. 생략하면 물어본다 |
+| 플래너 | `astar` `dvo` `hybrid` | 회피 알고리즘. 생략하면 물어본다 |
 | 모드 | `2` `3` | 어뢰 유도 방식 (2=SimpleTracking, 3=PNG) |
-| `--speed` | `slow` `mid` `fast` | 어뢰 속도 (6.5 / 8.5 / 12.2 m/s) |
+| `--speed` | `slow` `mid` `fast` | 어뢰 속도 (6.5 / 8.5 / 12.2 m/s). 안 고르면 `fast` |
+| `--pick` | — | 인자를 줬어도 나머지를 대화형으로 고른다 |
+| `--step` | — | 한 판씩 실행 + 사용자 판정 (중단/재개 가능) |
+| `--restart` | — | `--step` 기록을 지우고 처음부터 |
 | `--fire-delay` | 초 (기본 2) | 목표 발행 후 발사까지. 길수록 ROV가 앞서가 어뢰가 불리 |
 | `--watch` | 초 (기본 45) | 발사 후 결과 관찰 시간 |
-| `--no-gazebo` | — | Gazebo가 이미 떠 있으면 재사용 (빠름) |
 
+`--batch`/`--step`은 `astar`와 `dvo`만 비교한다(`hybrid`는 단일 실행으로 고른다).
 Gazebo는 headless로 뜨므로 화면을 가리지 않는다. 실험 로그는 `results/`에 쌓인다.
 
 ### 수동 실험 (직접 보면서)

@@ -257,6 +257,10 @@ void PlanningModule::handleDecision(
     decision.frame_id, input.bluerov.position, plannerName(input.planner),
     decision.avoid_mode, decision.hit_latched, decision.hit_distance,
     decision.show_avoided, decision.avoided_min_distance);
+  // 예측 통로는 계획 성공 여부와 무관하게 매 틱 갱신한다. A*는 회피
+  // 재계획을 한 번만 하므로 계획 때만 그리면 박스가 그 자리에 얼어붙는다.
+  visualizer_->publishTorpedoCorridor(
+    decision.frame_id, decision.torpedo_corridor);
 
   switch (decision.skip) {
     case Decision::Skip::kHitLatched:
@@ -460,9 +464,9 @@ void PlanningModule::publishPlan(
   publishPoint(current_point_pub_, request.start, request.frame_id);
   publishPoint(goal_point_pub_, request.goal, request.frame_id);
   publishPoint(torpedo_point_pub_, request.torpedo, request.frame_id);
+  // 통로 박스는 update()가 매 틱 그리므로 여기서는 경로·목표만 갱신한다.
   visualizer_->publishScene(
-    request.frame_id, request.start, request.goal, result.obstacles,
-    result.path);
+    request.frame_id, request.start, request.goal, result.path);
 }
 
 // runPlanner가 돌려준 실패 사유를 로그로 옮긴다. 문자열과 throttle 주기는

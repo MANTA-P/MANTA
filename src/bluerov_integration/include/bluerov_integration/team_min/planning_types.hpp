@@ -193,6 +193,9 @@ struct Decision
   // Dynamic VO: A* is refreshed only when this flag is true; VO may run every tick.
   bool global_replan_required{false};
   std::optional<PlanRequest> plan_request;
+  // 이번 틱의 어뢰 예측 통로다. 계획을 안 돌린 틱에도 채워지므로 어댑터가
+  // 매 틱 다시 그려 마커가 어뢰를 따라간다(비어 있으면 지운다).
+  std::vector<BoxObstacle> torpedo_corridor;
 
   // 이번 틱에 발생한 이벤트(각각 1회성)
   bool engagement_started{false};
