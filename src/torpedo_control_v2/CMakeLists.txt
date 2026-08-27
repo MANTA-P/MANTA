@@ -6,51 +6,52 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
-find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
 
-add_executable(
-  torpedo_control_node_v2
-  src/state_receiver.cpp
+add_executable(torpedo_control_node_v2
+  src/actuator_mixer.cpp
+  src/control_core.cpp
+  src/default_control_config.cpp
+  src/keyboard_controller.cpp
   src/keyboard_input.cpp
-  src/control_logic.cpp
-  src/csv_logger.cpp
+  src/png_controller.cpp
+  src/ros_interface.cpp
+  src/roll_controller.cpp
+  src/simple_tracking_controller.cpp
   src/torpedo_control_node.cpp
+  src/util/tick_tock.cpp
+  src/util/vector3.cpp
 )
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_sources(torpedo_control_node_v2 PRIVATE src/cli_display.cpp)
+endif()
 
 target_include_directories(torpedo_control_node_v2 PUBLIC include)
 target_compile_features(torpedo_control_node_v2 PUBLIC cxx_std_17)
 
-ament_target_dependencies(
-  torpedo_control_node_v2
+ament_target_dependencies(torpedo_control_node_v2
   nav_msgs
+  geometry_msgs
   rclcpp
-  sensor_msgs
   std_msgs
+  tf2_ros
 )
 
-install(
-  TARGETS torpedo_control_node_v2
+install(TARGETS torpedo_control_node_v2
   DESTINATION lib/${PROJECT_NAME}
 )
 
-install(
-  DIRECTORY include/
+install(DIRECTORY include/
   DESTINATION include
 )
 
-install(
-  DIRECTORY config launch
+install(DIRECTORY config launch
   DESTINATION share/${PROJECT_NAME}
 )
-
-if(BUILD_TESTING)
-  find_package(ament_lint_auto REQUIRED)
-  set(ament_cmake_copyright_FOUND TRUE)
-  set(ament_cmake_cpplint_FOUND TRUE)
-  ament_lint_auto_find_test_dependencies()
-endif()
 
 ament_package()
