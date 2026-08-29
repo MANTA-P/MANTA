@@ -103,7 +103,7 @@ Teensy 4.1은 CAN 컨트롤러 3개를 제공하며, 이번 구성에서는 그�
 | PC-ESP32 UART 장치 | `/dev/ttyACM0` |
 | UART 설정 | 115200, 8N1, 흐름 제어 없음 |
 | CAN 종류 | Classical CAN |
-| CAN bitrate | 250 kbit/s |
+| CAN bitrate | 500 kbit/s |
 | CAN ID 형식 | 표준 11-bit ID |
 | CAN payload 최대 크기 | 프레임당 8 byte |
 
@@ -257,9 +257,9 @@ ROS 2 메시지를 임베디드 데이터로 변환할 때 다음 항목을 명�
 
 ### 7.2 부하 생성 방식
 
-250 kbit/s Classical CAN에서 표준 ID와 8-byte payload를 사용하는 프레임은
-데이터 패턴에 따른 bit stuffing을 포함해 대략 444~540 μs 동안 버스를
-점유한다. 초기 부하 시험에서는 Teensy CAN1이 약 400 μs 이하의 요청 주기로
+500 kbit/s Classical CAN에서 표준 ID와 8-byte payload를 사용하는 프레임은
+데이터 패턴에 따른 bit stuffing을 포함해 대략 222~270 μs 동안 버스를
+점유한다. 초기 부하 시험에서는 Teensy CAN1이 약 200 μs 이하의 요청 주기로
 프레임을 생성하여 물리 버스 처리량보다 많은 데이터를 공급한다.
 
 이는 모든 데이터를 전달하기 위한 설정이 아니다. CAN 버스를 포화 상태로
@@ -353,7 +353,7 @@ E-stop: 최저 우선순위
 
 - ESP32 A/B 및 Teensy에 SN65HVD230 연결
 - CANH/CANL/GND와 종단저항 확인
-- 모든 노드에서 250 kbit/s 송수신 확인
+- 모든 노드에서 500 kbit/s 송수신 확인
 - 고정 counter 프레임의 누락과 오류 확인
 
 완료 조건: 세 장치가 동일 CAN 버스에서 정상적으로 송수신하고 ACK 오류가 없다.

@@ -138,15 +138,15 @@ USB Serial/JTAG 컨트롤러가 제공하는 CDC serial channel이다. 터미널
 baud rate를 설정하지만 실제 데이터는 UART baud clock이 아니라 USB 전송으로
 이동한다.
 
-250 kbit/s Classical CAN의 물리 선로 최대량은 다음과 같다.
+500 kbit/s Classical CAN의 물리 선로 최대량은 다음과 같다.
 
 ```text
-250,000 bit/s ÷ 8 = 31,250 byte/s
+500,000 bit/s ÷ 8 = 62,500 byte/s
 ```
 
 실제 CAN payload 처리량은 CAN ID, CRC, ACK, frame 간격과 bit stuffing 때문에
 이보다 낮다. 따라서 USB CDC가 SITL 상태 데이터를 ESP32 A에 공급하는 속도는
-250 kbit/s CAN의 게이트웨이 용도로 충분하다. 다만 ESP32 애플리케이션이 USB
+500 kbit/s CAN의 게이트웨이 용도로 충분하다. 다만 ESP32 애플리케이션이 USB
 데이터를 제때 읽지 않으면 USB Serial/JTAG 쓰기가 block될 수 있으므로 수신
 태스크와 ring buffer가 필요하다.
 
@@ -160,7 +160,7 @@ baud rate를 설정하지만 실제 데이터는 UART baud clock이 아니라 US
                   = 11,520 byte/s
 ```
 
-이는 250 kbit/s CAN 전체 트래픽을 공급하기에 부족하다. 본 프로젝트의 HIL
+이는 500 kbit/s CAN 전체 트래픽을 공급하기에 부족하다. 본 프로젝트의 HIL
 데이터 경로는 ESP32-S3 USB CDC를 기본으로 하며, GPIO UART를 사용할 경우에는
 더 높은 baud rate와 실제 오류율을 별도로 검증한다.
 
@@ -273,7 +273,7 @@ USB의 실제 처리량은 명목 USB 속도만으로 확정하지 않고 다음
 1. PC가 크기가 알려진 binary packet을 연속 송신한다.
 2. ESP32가 수신 byte, packet, CRC 오류와 overflow 수를 집계한다.
 3. 1분 이상 송신해 평균·최소·최대 처리량을 기록한다.
-4. 동시에 CAN 250 kbit/s 송수신과 ESP32 B 제어 주기를 실행한다.
+4. 동시에 CAN 500 kbit/s 송수신과 ESP32 B 제어 주기를 실행한다.
 5. HIL 데이터 누락, 제어 주기 jitter 및 USB block 여부를 확인한다.
 
 통과 기준은 실제 HIL 입력 데이터율에 안전 여유를 더한 부하에서 packet 손상과
