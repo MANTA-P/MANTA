@@ -1,4 +1,46 @@
 cmake_minimum_required(VERSION 3.16)
 
-include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+if(ESP_PLATFORM)
+  include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+  project(esp32_bridge)
+  return()
+endif()
+
 project(esp32_bridge)
+
+if(NOT CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 17)
+endif()
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(dave_interfaces REQUIRED)
+
+add_executable(esp32_hil_bridge_node
+  src/hil_bridge_node.cpp
+  src/packet_codec.cpp
+  src/uart_port.cpp
+)
+target_include_directories(esp32_hil_bridge_node PRIVATE include)
+ament_target_dependencies(esp32_hil_bridge_node
+  rclcpp
+  std_msgs
+  sensor_msgs
+  nav_msgs
+  geometry_msgs
+  dave_interfaces
+)
+
+install(TARGETS esp32_hil_bridge_node
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+ament_package()

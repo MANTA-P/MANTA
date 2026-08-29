@@ -3,13 +3,18 @@
 <package format="3">
   <name>esp32_bridge</name>
   <version>0.1.0</version>
-  <description>Send keyboard input bytes to an ESP32 over UART.</description>
+  <description>Bridge BlueROV SITL ROS data and ESP32 HIL control over USB CDC.</description>
 
   <maintainer email="user@todo.todo">user</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>dave_interfaces</depend>
 
   <export>
     <build_type>ament_cmake</build_type>

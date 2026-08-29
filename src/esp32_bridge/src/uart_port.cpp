@@ -1,6 +1,7 @@
 #include "esp32_bridge/uart_port.hpp"
 
 #include <fcntl.h>
+#include <poll.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -31,7 +32,8 @@ speed_t toTermiosBaudRate(const int baud_rate)
 
 UartPort::UartPort(const std::string & device, const int baud_rate)
 {
-  file_descriptor_ = ::open(device.c_str(), O_RDWR | O_NOCTTY | O_CLOEXEC);
+  file_descriptor_ = ::open(
+    device.c_str(), O_RDWR | O_NOCTTY | O_CLOEXEC | O_NONBLOCK);
   if (file_descriptor_ == -1) {
     throw std::system_error(errno, std::generic_category(), "failed to open " + device);
   }
@@ -72,16 +74,49 @@ UartPort::~UartPort()
   }
 }
 
-void UartPort::writeByte(const std::uint8_t byte) const
+void UartPort::writeAll(const std::vector<std::uint8_t> & data) const
 {
-  ssize_t result;
-  do {
-    result = ::write(file_descriptor_, &byte, 1);
-  } while (result == -1 && errno == EINTR);
-
-  if (result != 1) {
+  std::size_t offset = 0;
+  while (offset < data.size()) {
+    const ssize_t result = ::write(
+      file_descriptor_, data.data() + offset, data.size() - offset);
+    if (result > 0) {
+      offset += static_cast<std::size_t>(result);
+      continue;
+    }
+    if (result == -1 && errno == EINTR) {
+      continue;
+    }
+    if (result == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+      pollfd descriptor{file_descriptor_, POLLOUT, 0};
+      const int ready = ::poll(&descriptor, 1, 100);
+      if (ready > 0) {
+        continue;
+      }
+      if (ready == 0) {
+        throw std::runtime_error("UART write timed out");
+      }
+      if (errno == EINTR) {
+        continue;
+      }
+    }
     throw std::system_error(errno, std::generic_category(), "UART write failed");
   }
+}
+
+std::vector<std::uint8_t> UartPort::readAvailable(const std::size_t maximum_size) const
+{
+  std::vector<std::uint8_t> data(maximum_size);
+  const ssize_t result = ::read(file_descriptor_, data.data(), data.size());
+  if (result > 0) {
+    data.resize(static_cast<std::size_t>(result));
+    return data;
+  }
+  if (result == 0 || errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+    data.clear();
+    return data;
+  }
+  throw std::system_error(errno, std::generic_category(), "UART read failed");
 }
 
 }  // namespace esp32_bridge
