@@ -1,0 +1,51 @@
+menu "Teensy CAN bridge configuration"
+
+    config CAN_TX_GPIO
+        int "TWAI TX GPIO"
+        range 0 48
+        default 5
+        help
+            GPIO connected to the TXD input of the external CAN transceiver.
+            Verify this pin against the exact ESP32-S3 board schematic.
+
+    config CAN_RX_GPIO
+        int "TWAI RX GPIO"
+        range 0 48
+        default 4
+        help
+            GPIO connected to the RXD output of the external CAN transceiver.
+            Verify this pin against the exact ESP32-S3 board schematic.
+
+    choice CAN_BITRATE
+        prompt "Classical CAN bitrate"
+        default CAN_BITRATE_500K
+
+        config CAN_BITRATE_125K
+            bool "125 kbit/s"
+
+        config CAN_BITRATE_250K
+            bool "250 kbit/s"
+
+        config CAN_BITRATE_500K
+            bool "500 kbit/s"
+
+        config CAN_BITRATE_1M
+            bool "1 Mbit/s"
+    endchoice
+
+    config CAN_MESSAGE_ID
+        hex "11-bit standard CAN identifier"
+        range 0x000 0x7FF
+        default 0x123
+
+    config CAN_SEND_PERIOD_MS
+        int "Transmit period (ms)"
+        range 10 60000
+        default 100
+
+    config CAN_TX_TIMEOUT_MS
+        int "Transmit queue timeout (ms)"
+        range 0 10000
+        default 20
+
+endmenu

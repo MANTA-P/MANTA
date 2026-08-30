@@ -1,0 +1,522 @@
+#include <Arduino.h>
+#include <FlexCAN_T4.h>
+#include <string.h>
+
+#include "config.h"
+
+FlexCAN_T4<CAN1, RX_SIZE_16, TX_SIZE_16> dumpCan;
+FlexCAN_T4<CAN2, RX_SIZE_16, TX_SIZE_16> estopCan;
+
+constexpr FLEXCAN_MAILBOX kDumpMailboxA = MB8;
+constexpr FLEXCAN_MAILBOX kDumpMailboxB = MB9;
+constexpr FLEXCAN_MAILBOX kEstopMailbox = MB8;
+
+struct Statistics {
+  uint32_t dumpGenerated = 0;
+  uint32_t dumpEnqueued = 0;
+  uint32_t dumpDropped = 0;
+  uint32_t dumpMailboxBusy = 0;
+  uint32_t estopDebouncedEvents = 0;
+  uint32_t estopTxRequests = 0;
+  uint32_t estopTxFailOrRetry = 0;
+  uint32_t estopQueueOverflow = 0;
+  uint32_t canErrorCount = 0;
+  uint32_t busOffCount = 0;
+};
+
+struct EstopEvent {
+  bool active = false;
+  uint16_t sequence = 0;
+  uint32_t rawUs = 0;
+  uint32_t debouncedUs = 0;
+  uint32_t requestUs = 0;
+  uint32_t firstTxUs = 0;
+  uint32_t nextSendUs = 0;
+  uint8_t remaining = 0;
+  bool inFlight = false;
+  bool hasRequestTimestamp = false;
+  bool hasFirstTxTimestamp = false;
+};
+
+struct LastEstopTiming {
+  bool valid = false;
+  bool active = false;
+  uint16_t sequence = 0;
+  uint32_t rawToDebouncedUs = 0;
+  uint32_t requestToTxUs = 0;
+};
+
+Statistics stats;
+EstopEvent estopQueue[kEstopQueueCapacity];
+uint8_t estopQueueHead = 0;
+uint8_t estopQueueTail = 0;
+uint8_t estopQueueCount = 0;
+LastEstopTiming lastEstopTiming;
+
+volatile uint8_t switchRawLevel = HIGH;
+volatile uint32_t switchRawEdgeUs = 0;
+volatile uint32_t estopRawEdges = 0;
+volatile bool switchRawChanged = false;
+
+volatile uint32_t dumpTxSuccess = 0;
+volatile uint8_t dumpTxCompletedMask = 0;
+
+volatile uint32_t estopTxSuccess = 0;
+volatile bool estopTxCompleted = false;
+volatile uint16_t estopCompletedSequence = 0;
+volatile uint32_t estopCompletedUs = 0;
+
+uint8_t switchCandidateLevel = HIGH;
+uint8_t switchDebouncedLevel = HIGH;
+uint32_t switchCandidateSinceUs = 0;
+uint16_t nextEstopSequence = 0;
+
+uint32_t dumpSequence = 0;
+uint32_t nextDumpGenerationUs = 0;
+CAN_message_t latestDumpFrame;
+bool latestDumpPending = false;
+bool dumpMailboxAInFlight = false;
+bool dumpMailboxBInFlight = false;
+
+uint32_t nextStatsUs = 0;
+bool dumpBusOff = false;
+bool estopBusOff = false;
+
+static uint32_t estopId()
+{
+  return kPriorityInverted ? kNormalDumpId : kNormalEstopId;
+}
+
+static uint32_t dumpId()
+{
+  return kPriorityInverted ? kNormalEstopId : kNormalDumpId;
+}
+
+static bool timeReached(uint32_t now, uint32_t deadline)
+{
+  return static_cast<int32_t>(now - deadline) >= 0;
+}
+
+static bool switchIsActive(uint8_t level)
+{
+  return level == kEstopActiveLevel;
+}
+
+static uint8_t inactiveSwitchLevel()
+{
+  return kEstopActiveLevel == LOW ? HIGH : LOW;
+}
+
+static void writeUint16BigEndian(uint8_t *destination, uint16_t value)
+{
+  destination[0] = static_cast<uint8_t>(value >> 8);
+  destination[1] = static_cast<uint8_t>(value);
+}
+
+static uint16_t readUint16BigEndian(const uint8_t *source)
+{
+  return (static_cast<uint16_t>(source[0]) << 8) |
+         static_cast<uint16_t>(source[1]);
+}
+
+static void writeUint32BigEndian(uint8_t *destination, uint32_t value)
+{
+  destination[0] = static_cast<uint8_t>(value >> 24);
+  destination[1] = static_cast<uint8_t>(value >> 16);
+  destination[2] = static_cast<uint8_t>(value >> 8);
+  destination[3] = static_cast<uint8_t>(value);
+}
+
+void switchEdgeIsr()
+{
+  switchRawLevel = static_cast<uint8_t>(digitalRead(kEstopSwitchPin));
+  switchRawEdgeUs = micros();
+  ++estopRawEdges;
+  switchRawChanged = true;
+}
+
+void dumpTransmitComplete(const CAN_message_t &message)
+{
+  ++dumpTxSuccess;
+  if (message.mb == kDumpMailboxA) {
+    dumpTxCompletedMask |= 0x01;
+  } else if (message.mb == kDumpMailboxB) {
+    dumpTxCompletedMask |= 0x02;
+  }
+}
+
+void estopTransmitComplete(const CAN_message_t &message)
+{
+  ++estopTxSuccess;
+  estopCompletedSequence = readUint16BigEndian(&message.buf[2]);
+  estopCompletedUs = micros();
+  estopTxCompleted = true;
+}
+
+static void enqueueEstopEvent(bool active, uint32_t rawUs,
+                              uint32_t debouncedUs)
+{
+  ++stats.estopDebouncedEvents;
+
+  if (estopQueueCount == kEstopQueueCapacity) {
+    ++stats.estopQueueOverflow;
+    ++stats.estopTxFailOrRetry;
+    return;
+  }
+
+  EstopEvent &event = estopQueue[estopQueueTail];
+  event = EstopEvent{};
+  event.active = active;
+  event.sequence = nextEstopSequence++;
+  event.rawUs = rawUs;
+  event.debouncedUs = debouncedUs;
+  event.nextSendUs = debouncedUs;
+  event.remaining = kEstopRepeatCount;
+
+  estopQueueTail = (estopQueueTail + 1) % kEstopQueueCapacity;
+  ++estopQueueCount;
+}
+
+static void processSwitch(uint32_t now)
+{
+  bool changed;
+  uint8_t rawLevel;
+  uint32_t rawEdgeUs;
+
+  noInterrupts();
+  changed = switchRawChanged;
+  rawLevel = switchRawLevel;
+  rawEdgeUs = switchRawEdgeUs;
+  switchRawChanged = false;
+  interrupts();
+
+  if (changed) {
+    switchCandidateLevel = rawLevel;
+    switchCandidateSinceUs = rawEdgeUs;
+  }
+
+  if (switchCandidateLevel != switchDebouncedLevel &&
+      static_cast<uint32_t>(now - switchCandidateSinceUs) >= kDebounceUs) {
+    switchDebouncedLevel = switchCandidateLevel;
+    enqueueEstopEvent(switchIsActive(switchDebouncedLevel),
+                      switchCandidateSinceUs, now);
+  }
+}
+
+static void fillEstopFrame(CAN_message_t &frame, const EstopEvent &event)
+{
+  frame = CAN_message_t{};
+  frame.id = estopId();
+  frame.len = 8;
+  frame.flags.extended = false;
+  frame.buf[0] = event.active ? 0x01 : 0x00;
+  frame.buf[1] = kPriorityInverted ? 0x01 : 0x00;
+  writeUint16BigEndian(&frame.buf[2], event.sequence);
+  writeUint32BigEndian(&frame.buf[4], event.debouncedUs);
+}
+
+static void consumeEstopCompletion()
+{
+  bool completed;
+  uint16_t sequence;
+  uint32_t completedUs;
+
+  noInterrupts();
+  completed = estopTxCompleted;
+  sequence = estopCompletedSequence;
+  completedUs = estopCompletedUs;
+  estopTxCompleted = false;
+  interrupts();
+
+  if (!completed || estopQueueCount == 0) {
+    return;
+  }
+
+  EstopEvent &event = estopQueue[estopQueueHead];
+  if (!event.inFlight || sequence != event.sequence) {
+    ++stats.estopTxFailOrRetry;
+    return;
+  }
+
+  event.inFlight = false;
+  if (!event.hasFirstTxTimestamp) {
+    event.firstTxUs = completedUs;
+    event.hasFirstTxTimestamp = true;
+  }
+
+  if (event.remaining > 0) {
+    --event.remaining;
+  }
+
+  if (event.remaining == 0) {
+    lastEstopTiming.valid = true;
+    lastEstopTiming.active = event.active;
+    lastEstopTiming.sequence = event.sequence;
+    lastEstopTiming.rawToDebouncedUs = event.debouncedUs - event.rawUs;
+    lastEstopTiming.requestToTxUs = event.firstTxUs - event.requestUs;
+
+    estopQueueHead = (estopQueueHead + 1) % kEstopQueueCapacity;
+    --estopQueueCount;
+  } else {
+    event.nextSendUs = completedUs + kEstopRepeatIntervalUs;
+  }
+}
+
+static void processEstopTransmit(uint32_t now)
+{
+  consumeEstopCompletion();
+
+  if (estopQueueCount == 0) {
+    return;
+  }
+
+  EstopEvent &event = estopQueue[estopQueueHead];
+  if (event.inFlight || !timeReached(now, event.nextSendUs)) {
+    return;
+  }
+
+  CAN_message_t frame;
+  fillEstopFrame(frame, event);
+  ++stats.estopTxRequests;
+
+  if (estopCan.write(kEstopMailbox, frame) == 1) {
+    event.inFlight = true;
+    if (!event.hasRequestTimestamp) {
+      event.requestUs = now;
+      event.hasRequestTimestamp = true;
+    }
+  } else {
+    ++stats.estopTxFailOrRetry;
+    event.nextSendUs = now + kEstopRepeatIntervalUs;
+  }
+}
+
+static bool generateLatestDump(uint32_t now)
+{
+  if (!kDumpEnabled || !timeReached(now, nextDumpGenerationUs)) {
+    return false;
+  }
+
+  const uint32_t elapsed = now - nextDumpGenerationUs;
+  const uint32_t generatedCount = elapsed / kDumpPeriodUs + 1;
+  nextDumpGenerationUs += generatedCount * kDumpPeriodUs;
+
+  stats.dumpGenerated += generatedCount;
+  if (generatedCount > 1) {
+    stats.dumpDropped += generatedCount - 1;
+  }
+  if (latestDumpPending) {
+    ++stats.dumpDropped;
+  }
+
+  dumpSequence += generatedCount;
+  latestDumpFrame = CAN_message_t{};
+  latestDumpFrame.id = dumpId();
+  latestDumpFrame.len = 8;
+  latestDumpFrame.flags.extended = false;
+  writeUint32BigEndian(&latestDumpFrame.buf[0], dumpSequence - 1);
+  writeUint32BigEndian(&latestDumpFrame.buf[4], now);
+  latestDumpPending = true;
+  return true;
+}
+
+static bool consumeDumpCompletions()
+{
+  uint8_t completedMask;
+  noInterrupts();
+  completedMask = dumpTxCompletedMask;
+  dumpTxCompletedMask = 0;
+  interrupts();
+
+  if (completedMask & 0x01) {
+    dumpMailboxAInFlight = false;
+  }
+  if (completedMask & 0x02) {
+    dumpMailboxBInFlight = false;
+  }
+  return completedMask != 0;
+}
+
+static void enqueueLatestDump()
+{
+  FLEXCAN_MAILBOX mailbox;
+  bool *inFlight;
+
+  if (!dumpMailboxAInFlight) {
+    mailbox = kDumpMailboxA;
+    inFlight = &dumpMailboxAInFlight;
+  } else if (!dumpMailboxBInFlight) {
+    mailbox = kDumpMailboxB;
+    inFlight = &dumpMailboxBInFlight;
+  } else {
+    ++stats.dumpMailboxBusy;
+    return;
+  }
+
+  if (dumpCan.write(mailbox, latestDumpFrame) == 1) {
+    *inFlight = true;
+    latestDumpPending = false;
+    ++stats.dumpEnqueued;
+  } else {
+    ++stats.dumpMailboxBusy;
+  }
+}
+
+static void processDump(uint32_t now)
+{
+  const bool generated = generateLatestDump(now);
+  const bool transmitCompleted = consumeDumpCompletions();
+
+  if (!latestDumpPending || (!generated && !transmitCompleted)) {
+    return;
+  }
+  enqueueLatestDump();
+}
+
+static void recordCanError(const CAN_error_t &error, bool &wasBusOff)
+{
+  const bool hasError = error.BIT1_ERR || error.BIT0_ERR ||
+                        error.ACK_ERR || error.CRC_ERR ||
+                        error.FRM_ERR || error.STF_ERR ||
+                        error.TX_WRN || error.RX_WRN;
+  if (hasError) {
+    ++stats.canErrorCount;
+  }
+
+  const bool isBusOff = strcmp(error.FLT_CONF, "Bus off") == 0;
+  if (isBusOff && !wasBusOff) {
+    ++stats.busOffCount;
+  }
+  wasBusOff = isBusOff;
+}
+
+static void collectCanErrors()
+{
+  CAN_error_t error;
+  while (dumpCan.error(error, false)) {
+    recordCanError(error, dumpBusOff);
+  }
+  while (estopCan.error(error, false)) {
+    recordCanError(error, estopBusOff);
+  }
+}
+
+static void printStatistics(uint32_t now)
+{
+  if (!timeReached(now, nextStatsUs)) {
+    return;
+  }
+  nextStatsUs += kStatsPeriodUs;
+
+  uint32_t rawEdges;
+  uint32_t dumpSuccess;
+  uint32_t estopSuccess;
+  noInterrupts();
+  rawEdges = estopRawEdges;
+  dumpSuccess = dumpTxSuccess;
+  estopSuccess = estopTxSuccess;
+  interrupts();
+
+  Serial.printf(
+      "STAT mode=%s uptime_us=%lu dump_generated=%lu dump_enqueued=%lu "
+      "dump_tx_success=%lu dump_dropped=%lu dump_mailbox_busy=%lu "
+      "dump_in_flight=%u "
+      "estop_raw_edges=%lu estop_debounced_events=%lu "
+      "estop_tx_requests=%lu estop_tx_success=%lu "
+      "estop_tx_fail_or_retry=%lu estop_queue=%u estop_queue_overflow=%lu "
+      "can_error_count=%lu bus_off_count=%lu\n",
+      kPriorityInverted ? "inverted" : "normal",
+      static_cast<unsigned long>(now),
+      static_cast<unsigned long>(stats.dumpGenerated),
+      static_cast<unsigned long>(stats.dumpEnqueued),
+      static_cast<unsigned long>(dumpSuccess),
+      static_cast<unsigned long>(stats.dumpDropped),
+      static_cast<unsigned long>(stats.dumpMailboxBusy),
+      static_cast<unsigned int>(dumpMailboxAInFlight) +
+          static_cast<unsigned int>(dumpMailboxBInFlight),
+      static_cast<unsigned long>(rawEdges),
+      static_cast<unsigned long>(stats.estopDebouncedEvents),
+      static_cast<unsigned long>(stats.estopTxRequests),
+      static_cast<unsigned long>(estopSuccess),
+      static_cast<unsigned long>(stats.estopTxFailOrRetry),
+      static_cast<unsigned int>(estopQueueCount),
+      static_cast<unsigned long>(stats.estopQueueOverflow),
+      static_cast<unsigned long>(stats.canErrorCount),
+      static_cast<unsigned long>(stats.busOffCount));
+
+  if (lastEstopTiming.valid) {
+    Serial.printf(
+        "LAT estop=%s seq=%u raw_to_debounced_us=%lu "
+        "request_to_first_tx_us=%lu\n",
+        lastEstopTiming.active ? "active" : "released",
+        static_cast<unsigned int>(lastEstopTiming.sequence),
+        static_cast<unsigned long>(lastEstopTiming.rawToDebouncedUs),
+        static_cast<unsigned long>(lastEstopTiming.requestToTxUs));
+  }
+}
+
+static void initializeCan()
+{
+  dumpCan.begin();
+  dumpCan.setBaudRate(kCanBitrate);
+  dumpCan.setMaxMB(16);
+  dumpCan.setMB(kDumpMailboxA, TX, STD);
+  dumpCan.setMB(kDumpMailboxB, TX, STD);
+  dumpCan.enableMBInterrupt(kDumpMailboxA);
+  dumpCan.enableMBInterrupt(kDumpMailboxB);
+  dumpCan.onTransmit(kDumpMailboxA, dumpTransmitComplete);
+  dumpCan.onTransmit(kDumpMailboxB, dumpTransmitComplete);
+
+  estopCan.begin();
+  estopCan.setBaudRate(kCanBitrate);
+  estopCan.setMaxMB(16);
+  estopCan.setMB(kEstopMailbox, TX, STD);
+  estopCan.enableMBInterrupt(kEstopMailbox);
+  estopCan.onTransmit(kEstopMailbox, estopTransmitComplete);
+}
+
+void setup()
+{
+  Serial.begin(115200);
+  while (!Serial && millis() < 3000) {
+  }
+
+  pinMode(kEstopSwitchPin, kEstopInputMode);
+  const uint32_t now = micros();
+  const uint8_t initialLevel = static_cast<uint8_t>(digitalRead(kEstopSwitchPin));
+  switchRawLevel = initialLevel;
+  switchRawEdgeUs = now;
+  switchCandidateLevel = initialLevel;
+  switchCandidateSinceUs = now;
+  switchDebouncedLevel = inactiveSwitchLevel();
+
+  initializeCan();
+  attachInterrupt(digitalPinToInterrupt(kEstopSwitchPin), switchEdgeIsr, CHANGE);
+
+  nextDumpGenerationUs = now + kDumpPeriodUs;
+  nextStatsUs = now + kStatsPeriodUs;
+
+  Serial.println("Teensy 4.1 CAN load/E-stop test started");
+  Serial.printf("mode=%s bitrate=%lu estop_id=0x%03lX dump_id=0x%03lX\n",
+                kPriorityInverted ? "inverted" : "normal",
+                static_cast<unsigned long>(kCanBitrate),
+                static_cast<unsigned long>(estopId()),
+                static_cast<unsigned long>(dumpId()));
+  Serial.printf(
+      "CAN1 dump TX=22 RX=23 mailboxes=8,9; CAN2 estop TX=1 RX=0\n");
+  Serial.printf("switch pin=%u active=%s debounce_us=%lu dump_period_us=%lu\n",
+                static_cast<unsigned int>(kEstopSwitchPin),
+                kEstopActiveLevel == LOW ? "LOW" : "HIGH",
+                static_cast<unsigned long>(kDebounceUs),
+                static_cast<unsigned long>(kDumpPeriodUs));
+}
+
+void loop()
+{
+  const uint32_t now = micros();
+  processSwitch(now);
+  processEstopTransmit(now);
+  processDump(now);
+  collectCanErrors();
+  printStatistics(now);
+}
