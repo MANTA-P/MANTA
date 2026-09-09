@@ -54,9 +54,15 @@ add_library(bluerov_team_min
   src/team_min/astar_planner.cpp
   src/team_min/dynamic_vo_planner.cpp
   src/team_min/planning_core.cpp
+  src/team_min/planning_config.cpp
+  src/team_min/planning_engine.cpp
   src/team_min/planning_module.cpp
   src/team_min/planning_params.cpp
   src/team_min/rviz_visualizer.cpp
+  src/team_min/spacetime_astar.cpp
+  src/team_min/torpedo_guidance.cpp
+  src/team_min/velocity_command.cpp
+  src/team_min/velocity_pid.cpp
 )
 target_include_directories(bluerov_team_min PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

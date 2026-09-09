@@ -52,6 +52,44 @@ std::vector<BoxObstacle> buildTorpedoObstacles(
   obstacles.push_back(current);
 
   const PredictionConfig & prediction = config.prediction;
+  // 항법 모델이 만든 곡선 궤적을 거리 간격으로 재샘플링해 A* 통로로 쓴다.
+  if (prediction.enabled && request.torpedo_predicted_path.size() > 1U) {
+    const double guard_margin =
+      config.astar.safety_margin + prediction.start_clearance;
+    double traversed = 0.0;
+    double next_offset = prediction.spacing;
+    for (std::size_t index = 1U;
+      index < request.torpedo_predicted_path.size() &&
+      static_cast<int>(obstacles.size()) <= prediction.max_boxes;
+      ++index)
+    {
+      const Point3D & from = request.torpedo_predicted_path[index - 1U];
+      const Point3D & to = request.torpedo_predicted_path[index];
+      const double segment = distance3D(from, to);
+      if (segment <= 1.0e-9) {
+        continue;
+      }
+      while (next_offset <= traversed + segment &&
+        static_cast<int>(obstacles.size()) <= prediction.max_boxes)
+      {
+        const double ratio = (next_offset - traversed) / segment;
+        BoxObstacle box = config.torpedo_barrier;
+        box.center = {
+          from.x + (to.x - from.x) * ratio,
+          from.y + (to.y - from.y) * ratio,
+          from.z + (to.z - from.z) * ratio};
+        if (!boxContains(box, request.start, guard_margin) &&
+          !boxContains(box, request.goal, guard_margin))
+        {
+          obstacles.push_back(box);
+        }
+        next_offset += prediction.spacing;
+      }
+      traversed += segment;
+    }
+    return obstacles;
+  }
+
   const double speed = distance3D(request.torpedo_velocity, Point3D{});
   // min_speed를 0으로 낮춰도 0 나누기가 없도록 하한을 둔다.
   if (!prediction.enabled || speed < prediction.min_speed || speed < 1.0e-6) {
@@ -170,7 +208,8 @@ std::vector<Point3D> mergePaths(
 }
 
 PlanningCore::PlanningCore(PlanningCoreConfig config)
-: config_(std::move(config))
+: config_(std::move(config)),
+  guidance_predictor_(config_.prediction)
 {
   if (!config_.use_target_topic_for_goal &&
     config_.goal_offset_x == 0.0 && config_.goal_offset_y == 0.0 &&
@@ -371,6 +410,7 @@ void PlanningCore::updateEngagement(
     if (distance < config_.avoid.engage_radius) {
       engaged_ = true;
       engagement_min_distance_ = closest;
+      reported_min_distance_ = std::numeric_limits<double>::infinity();
       decision.engagement_started = true;
       decision.engagement_distance = distance;
     }
@@ -378,6 +418,14 @@ void PlanningCore::updateEngagement(
   }
 
   engagement_min_distance_ = std::min(engagement_min_distance_, closest);
+
+  // 0.1 m 이상 좁혀졌을 때만 알린다. 교전이 끝나지 않아도 최소 이격이
+  // 로그에 남는다.
+  if (engagement_min_distance_ < reported_min_distance_ - 0.1) {
+    reported_min_distance_ = engagement_min_distance_;
+    decision.engagement_min_improved = true;
+    decision.engagement_min_distance = engagement_min_distance_;
+  }
 
   if (!hit_latched_ && engagement_min_distance_ < config_.avoid.hit_radius) {
     engaged_ = false;
@@ -399,6 +447,79 @@ void PlanningCore::updateEngagement(
     avoided_event_sec_ = input.now_sec;
     decision.avoided = true;
   }
+}
+
+// TTC = 거리 / 접근속도. 접근속도는 상대속도를 시선(LOS)에 투영한 성분이다.
+// 정면충돌이면 두 속력의 합이지만, 비스듬하면 그보다 작다. 거리만 보면
+// 방향에 따라 여유가 6배까지 차이나므로(정면 3.1초 vs 후방 8.3초) 국면
+// 판정에는 거리가 아니라 TTC를 써야 한다.
+double PlanningCore::timeToCollision(
+  const Point3D & rov_position,
+  const Point3D & torpedo_position,
+  double * closing_out) const
+{
+  const Point3D line{
+    torpedo_position.x - rov_position.x,
+    torpedo_position.y - rov_position.y,
+    torpedo_position.z - rov_position.z};
+  const double range = distance3D(line, Point3D{});
+  if (range < 1.0e-6) {
+    if (closing_out) {*closing_out = 0.0;}
+    return 0.0;
+  }
+  const Point3D unit{line.x / range, line.y / range, line.z / range};
+  const Point3D relative{
+    (have_torpedo_velocity_ ? torpedo_velocity_.x : 0.0) -
+    (have_robot_velocity_ ? robot_velocity_.x : 0.0),
+    (have_torpedo_velocity_ ? torpedo_velocity_.y : 0.0) -
+    (have_robot_velocity_ ? robot_velocity_.y : 0.0),
+    (have_torpedo_velocity_ ? torpedo_velocity_.z : 0.0) -
+    (have_robot_velocity_ ? robot_velocity_.z : 0.0)};
+  // 거리변화율. 접근 중이면 음수다.
+  const double range_rate =
+    relative.x * unit.x + relative.y * unit.y + relative.z * unit.z;
+  const double closing = -range_rate;
+  if (closing_out) {*closing_out = closing;}
+  if (closing < config_.ttc.minimum_closing) {
+    return std::numeric_limits<double>::infinity();
+  }
+  return range / closing;
+}
+
+// 국면 전환. 경계에서 왕복하지 않도록 최소 체류시간을 둔다.
+// 실측에서 A*가 재계획마다 회피 축을 수직<->수평으로 바꾸는 걸 확인해,
+// 같은 진동이 국면에도 생길 수 있다고 보고 넣었다.
+void PlanningCore::updatePhase(
+  const double ttc_sec,
+  const bool torpedo_detected,
+  const double now_sec,
+  Decision & decision)
+{
+  EngagementPhase wanted = EngagementPhase::kCruise;
+  if (config_.ttc.enabled && torpedo_detected) {
+    if (ttc_sec < config_.ttc.break_sec) {
+      wanted = EngagementPhase::kBreak;
+    } else if (ttc_sec < config_.ttc.approach_sec) {
+      wanted = EngagementPhase::kApproach;
+    }
+  }
+
+  if (!have_phase_time_) {
+    phase_entered_sec_ = now_sec;
+    have_phase_time_ = true;
+  }
+  if (wanted != phase_) {
+    const double held = now_sec - phase_entered_sec_;
+    // 더 위험한 국면으로는 즉시 올라간다(늦으면 못 피한다).
+    // 덜 위험한 쪽으로 내려갈 때만 체류시간을 지킨다.
+    const bool escalating = static_cast<int>(wanted) > static_cast<int>(phase_);
+    if (escalating || held >= config_.ttc.dwell_sec) {
+      phase_ = wanted;
+      phase_entered_sec_ = now_sec;
+      decision.phase_changed = true;
+    }
+  }
+  decision.phase = phase_;
 }
 
 bool PlanningCore::needsReplan(
@@ -489,6 +610,23 @@ Decision PlanningCore::update(
   const bool torpedo_detected =
     sampleFresh(input.torpedo, input.now_sec, config_.avoid.torpedo_timeout_sec);
 
+  // 어뢰를 등속 직진이 아니라 유도체로 예측한다. PN 과 순수추적의
+  // one-step 오차를 비교해 어느 쪽인지 식별하고 곡선 궤적을 만든다.
+  GuidancePrediction guidance_prediction;
+  if (torpedo_detected &&
+    framesCompatible(input.bluerov.frame_id, input.torpedo.frame_id))
+  {
+    guidance_prediction = guidance_predictor_.update(
+      input.torpedo, torpedo_velocity_, have_torpedo_velocity_,
+      input.bluerov, robot_velocity_, have_robot_velocity_);
+  } else {
+    guidance_predictor_.reset();
+  }
+  decision.torpedo_guidance = guidance_prediction.law;
+  decision.pn_prediction_error =
+    guidance_prediction.proportional_navigation_error;
+  decision.pursuit_prediction_error = guidance_prediction.pure_pursuit_error;
+
   if (!input.bluerov.valid) {
     return decision;
   }
@@ -514,6 +652,15 @@ Decision PlanningCore::update(
   }
 
   updateEngagement(input, torpedo_detected, start, decision);
+
+  // 교전 국면 판정. 어댑터가 이 값으로 플래너와 DVO 가중치를 고른다.
+  double closing = 0.0;
+  const double ttc = torpedo_detected ?
+    timeToCollision(start, input.torpedo.position, &closing) :
+    std::numeric_limits<double>::infinity();
+  decision.ttc_sec = ttc;
+  decision.closing_speed = closing;
+  updatePhase(ttc, torpedo_detected, input.now_sec, decision);
 
   decision.hit_latched = hit_latched_;
   decision.hit_distance = hit_distance_;
@@ -560,6 +707,10 @@ Decision PlanningCore::update(
     torpedo_detected ? input.torpedo.position : Point3D{},
     (torpedo_detected && have_torpedo_velocity_) ?
     torpedo_velocity_ : Point3D{},
+    // 유도 모델이 만든 곡선 궤적. 어댑터가 채워 넣는다.
+    guidance_prediction.selected_path,
+    guidance_prediction.law,
+    config_.prediction.guidance_step_sec,
     torpedo_detected, input.planner, frame_id};
   // 충돌 검사용 통로는 worker의 execute()와 같은 함수로 만들어 판정을
   // 일치시킨다.
@@ -567,7 +718,9 @@ Decision PlanningCore::update(
   // 통로 시각화는 계획과 분리한다. A*는 재계획이 드물어(충돌 때만) 계획
   // 결과에만 실어 보내면 마커가 옛 어뢰 위치에 얼어붙는다. DVO 단독은
   // 어뢰를 움직이는 물체로 직접 다뤄 통로를 쓰지 않으므로 그리지 않는다.
-  if (input.planner != PlannerType::kDynamicVO) {
+  if (input.planner != PlannerType::kDynamicVO &&
+    input.planner != PlannerType::kSpaceTime)
+  {
     decision.torpedo_corridor = obstacles;
   }
   if (needsReplan(request, obstacles, last_path, input.now_sec)) {
@@ -589,6 +742,13 @@ Decision PlanningCore::update(
       break;
     case PlannerType::kHybrid:
       // A*는 필요할 때만, DVO는 어뢰가 보이는 동안 매 틱.
+      if (torpedo_detected || decision.global_replan_required) {
+        decision.plan_request = request;
+      }
+      break;
+    case PlannerType::kSpaceTime:
+      // 시간창이 8초라 어뢰가 보이는 동안은 매 틱 다시 푼다
+      // (receding horizon). 어뢰가 없으면 전역 A*와 같게 동작한다.
       if (torpedo_detected || decision.global_replan_required) {
         decision.plan_request = request;
       }

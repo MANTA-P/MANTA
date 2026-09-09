@@ -35,6 +35,35 @@ PredictionConfig loadPredictionParameters(
     "planning.prediction.velocity_alpha", defaults.velocity_alpha);
   defaults.start_clearance = node.declare_parameter<double>(
     "planning.prediction.start_clearance", defaults.start_clearance);
+  defaults.guidance_enabled = node.declare_parameter<bool>(
+    "planning.prediction.guidance.enabled", defaults.guidance_enabled);
+  defaults.guidance_horizon_sec = node.declare_parameter<double>(
+    "planning.prediction.guidance.horizon_sec", defaults.guidance_horizon_sec);
+  defaults.guidance_step_sec = node.declare_parameter<double>(
+    "planning.prediction.guidance.step_sec", defaults.guidance_step_sec);
+  defaults.pn_navigation_constant = node.declare_parameter<double>(
+    "planning.prediction.guidance.pn_navigation_constant",
+    defaults.pn_navigation_constant);
+  defaults.pursuit_turn_rate = node.declare_parameter<double>(
+    "planning.prediction.guidance.pursuit_turn_rate",
+    defaults.pursuit_turn_rate);
+  defaults.guidance_max_lateral_acceleration = node.declare_parameter<double>(
+    "planning.prediction.guidance.max_lateral_acceleration",
+    defaults.guidance_max_lateral_acceleration);
+  defaults.classification_alpha = node.declare_parameter<double>(
+    "planning.prediction.guidance.classification_alpha",
+    defaults.classification_alpha);
+  const auto min_samples = node.declare_parameter<std::int64_t>(
+    "planning.prediction.guidance.classification_min_samples",
+    static_cast<std::int64_t>(defaults.classification_min_samples));
+  if (min_samples <= 0) {
+    throw std::invalid_argument("classification_min_samples must be positive");
+  }
+  defaults.classification_min_samples = static_cast<std::size_t>(min_samples);
+  defaults.classification_ratio = node.declare_parameter<double>(
+    "planning.prediction.guidance.classification_ratio",
+    defaults.classification_ratio);
+
   return defaults;
 }
 
@@ -100,50 +129,59 @@ DynamicVOOptions loadDynamicVOParameters(
 
 }  // namespace
 
+// 시공간 A* 파라미터. 분기비율(max_speed*dt/resolution)이 2 미만이면
+// 코어가 예외를 던지므로, 셋을 함께 바꿔야 한다.
+void loadSpaceTimeParameters(rclcpp::Node & node, SpaceTimeOptions & options,
+  double & lookahead)
+{
+  options.resolution = node.declare_parameter<double>(
+    "planning.spacetime.resolution", options.resolution);
+  options.dt = node.declare_parameter<double>(
+    "planning.spacetime.dt", options.dt);
+  options.horizon_sec = node.declare_parameter<double>(
+    "planning.spacetime.horizon_sec", options.horizon_sec);
+  options.half_extent_xy = node.declare_parameter<double>(
+    "planning.spacetime.half_extent_xy", options.half_extent_xy);
+  options.half_extent_z = node.declare_parameter<double>(
+    "planning.spacetime.half_extent_z", options.half_extent_z);
+  options.max_speed = node.declare_parameter<double>(
+    "planning.spacetime.max_speed", options.max_speed);
+  options.max_vertical_speed = node.declare_parameter<double>(
+    "planning.spacetime.max_vertical_speed", options.max_vertical_speed);
+  options.safety_margin = node.declare_parameter<double>(
+    "planning.spacetime.safety_margin", options.safety_margin);
+  lookahead = node.declare_parameter<double>(
+    "planning.spacetime.lookahead", lookahead);
+}
+
+// TTC 국면 전환 파라미터. 기본값의 근거는 planning_types.hpp 주석에 있다
+// (Zarchan 3~5τ 규칙 / DVO 예측지평 / arXiv 2506.20311 C2 조건).
+void loadTtcParameters(rclcpp::Node & node, TtcSwitchConfig & ttc)
+{
+  ttc.enabled = node.declare_parameter<bool>(
+    "planning.ttc.enabled", ttc.enabled);
+  ttc.approach_sec = node.declare_parameter<double>(
+    "planning.ttc.approach_sec", ttc.approach_sec);
+  ttc.break_sec = node.declare_parameter<double>(
+    "planning.ttc.break_sec", ttc.break_sec);
+  ttc.reverse_sec = node.declare_parameter<double>(
+    "planning.ttc.reverse_sec", ttc.reverse_sec);
+  ttc.dwell_sec = node.declare_parameter<double>(
+    "planning.ttc.dwell_sec", ttc.dwell_sec);
+  ttc.minimum_closing = node.declare_parameter<double>(
+    "planning.ttc.minimum_closing", ttc.minimum_closing);
+}
+
+
 void loadTeamMinParameters(rclcpp::Node & node, PlanningConfig & config)
 {
+  loadTtcParameters(node, config.ttc);
   config.prediction = loadPredictionParameters(node, config.prediction);
   config.replan = loadReplanParameters(node, config.replan);
+  loadSpaceTimeParameters(node, config.spacetime, config.spacetime_lookahead);
   config.avoid = loadAvoidParameters(node, config.avoid);
   // Dynamic VO: load defaults without changing the integration node.
   config.dynamic_vo = loadDynamicVOParameters(node, config.dynamic_vo);
-}
-
-PlanningCoreConfig toCoreConfig(const PlanningConfig & config)
-{
-  PlanningCoreConfig core;
-  core.use_dynamic_map = config.use_dynamic_map;
-  core.use_target_topic_for_goal = config.use_target_topic_for_goal;
-  core.goal_offset_x = config.goal_offset_x;
-  core.goal_offset_y = config.goal_offset_y;
-  core.goal_offset_z = config.goal_offset_z;
-  core.map_padding_x = config.map_padding_x;
-  core.map_padding_y = config.map_padding_y;
-  core.map_padding_z = config.map_padding_z;
-  core.torpedo_replan_distance = config.torpedo_replan_distance;
-  core.robot_replan_distance = config.robot_replan_distance;
-  core.goal_replan_distance = config.goal_replan_distance;
-  core.fixed_map = config.fixed_map;
-  core.astar = config.astar;
-  core.torpedo_barrier = config.torpedo_barrier;
-  core.prediction = config.prediction;
-  core.replan = config.replan;
-  core.avoid = config.avoid;
-  return core;
-}
-
-std::optional<PlannerType> parsePlanner(const std::string & name)
-{
-  if (name == "astar") {
-    return PlannerType::kAStar;
-  }
-  if (name == "dvo") {
-    return PlannerType::kDynamicVO;
-  }
-  if (name == "hybrid") {
-    return PlannerType::kHybrid;
-  }
-  return std::nullopt;
 }
 
 }  // namespace bluerov_integration::team_min

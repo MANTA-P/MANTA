@@ -31,6 +31,10 @@ from pathlib import Path
 
 import pexpect
 
+# 어느 디렉터리에서 실행해도 되게 자기 폴더를 경로에 넣는다.
+# (에이전트가 cd 를 빠뜨려도 동작하도록)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import torpedo_scaling
 
 HOME = Path.home()
@@ -42,11 +46,35 @@ RESULTS = Path(os.environ.get("RESULTS_DIR",
                               HOME / "manta_experiments" / "results"))
 NODE = "/bluerov_integration_node"
 
+# 판마다 즉시 append 하는 결과 파일. 로그를 다시 파싱하지 않아도 되고,
+# 배치를 중간에 멈춰도 그때까지의 결과가 그대로 남는다.
+RESULTS_CSV_FIELDS = [
+    "번호", "시각", "시나리오", "플래너", "모드", "어뢰",
+    "결과", "최근접m", "피격회차", "교전횟수", "계획횟수",
+    "판정시간s", "발사거리m", "목적지m", "run_id",
+]
+
+
+def append_result(row):
+    """한 판 끝날 때마다 결과 한 줄을 파일에 붙인다."""
+    path = RESULTS / "results.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    is_new = not path.exists()
+    with open(path, "a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=RESULTS_CSV_FIELDS)
+        if is_new:
+            writer.writeheader()
+        writer.writerow(row)
+
 # 연료 소진(추력 차단) 후 타력으로 달리는 어뢰를 지켜보는 시간(초).
 # 청상어 조건 6.62 m/s에서 추력을 끊으면 항력만으로 급감속한다
 # (m dv/dt = -(8v + 12.474v²), m = 74.4 kg):
 #   5초 -> 0.73 m/s (9.9 m),  10초 -> 0.29 m/s (12.2 m)
 # 10초면 위협이 사라지므로 그때 판을 마감한다.
+# 판정: 공격 3회를 버티면 회피 성공으로 끝낸다. 연료가 마를
+# 때까지 보던 이전 기준은 4회차 이후의 결과까지 성패에 넣어
+# 판이 길어지고, '3회 안에 맞았나'라는 질문과도 어긋났다.
+SURVIVE_TARGET = 3
 COAST_SEC = 10.0
 
 # 어뢰 전방은 body +Y이고 yaw=0이면 world +Y로 발사된다.
@@ -116,6 +144,31 @@ def run_ros(args, timeout=20):
     )
 
 
+def build_packages():
+    """워크스페이스 루트에서 필요한 패키지만 빌드한다.
+
+    colcon 은 반드시 워크스페이스 루트에서 돌아야 한다. 다른 폴더에서
+    실행하면 거기에 build/ install/ log/ 를 새로 만들어 버린다.
+    그래서 여기서 경로를 못박는다.
+    """
+    command = (
+        "source /opt/ros/jazzy/setup.bash && cd %s && "
+        "colcon build --packages-select bluerov_integration "
+        "torpedo_control_v2 --cmake-args -DCMAKE_BUILD_TYPE=Release"
+        % WORKSPACE)
+    log("빌드: %s" % WORKSPACE)
+    result = subprocess.run(["bash", "-c", command],
+                            capture_output=True, text=True)
+    for line in result.stdout.splitlines()[-6:]:
+        log("   " + line)
+    if result.returncode != 0:
+        warn("빌드 실패:")
+        for line in result.stderr.splitlines()[-15:]:
+            warn("   " + line)
+        return False
+    return True
+
+
 def check_builds_fresh():
     """소스가 바이너리보다 최신이면 알린다.
 
@@ -144,6 +197,11 @@ def cleanup(kill_gazebo=True):
         "bluerov_integration.launch.py",
         "target_position_input_node",
         "torpedo_sitl_v2.launch.py",
+        # launch 종료가 자식까지 못 내리는 경우가 있어 직접 지정한다.
+        # 통합노드가 둘이면 경로가 이중 발행되고, 목표 발행기가 남으면
+        # 다음 판의 목표를 덮어써 결과가 통째로 무효가 된다.
+        "rviz2",
+        "topic pub -r 1 /mission/target_position",
     ]
     if kill_gazebo:
         patterns += ["dave_robot.launch.py", "gz sim", "ruby.*gz"]
@@ -195,6 +253,88 @@ def wait_for_gz_model(model, limit):
     return False
 
 
+# Gazebo 내부 월드명은 launch 인자(dave_ocean_waves)와 다르다.
+# gz service -l 로 확인한 실제 이름을 써야 한다.
+WORLD = "oceans_waves"
+
+
+def gz_remove_model(name):
+    """Gazebo에서 모델을 지운다. 재사용 시 이전 판 어뢰가 남지 않게."""
+    request = 'name: "%s" type: MODEL' % name
+    result = subprocess.run(
+        ["gz", "service", "-s", "/world/%s/remove" % WORLD,
+         "--reqtype", "gz.msgs.Entity", "--reptype", "gz.msgs.Boolean",
+         "--timeout", "3000", "--req", request],
+        env=ENV, capture_output=True, text=True, timeout=15)
+    return "true" in result.stdout.lower()
+
+
+def gz_reset_pose(name, x, y, z):
+    """모델 위치를 되돌린다. 속도는 남으므로 안정화 대기가 필요하다."""
+    request = ('name: "%s", position: {x: %s, y: %s, z: %s}, '
+               'orientation: {x: 0, y: 0, z: 0, w: 1}' % (name, x, y, z))
+    result = subprocess.run(
+        ["gz", "service", "-s", "/world/%s/set_pose" % WORLD,
+         "--reqtype", "gz.msgs.Pose", "--reptype", "gz.msgs.Boolean",
+         "--timeout", "3000", "--req", request],
+        env=ENV, capture_output=True, text=True, timeout=15)
+    return "true" in result.stdout.lower()
+
+
+def gz_model_pose(name):
+    """모델의 현재 위치를 읽는다(초기화 검증용)."""
+    try:
+        result = subprocess.run(
+            ["gz", "topic", "-e", "-t", "/model/%s/odometry" % name, "-n", "1"],
+            env=ENV, capture_output=True, text=True, timeout=10)
+    except Exception:
+        return None
+    section = result.stdout.split("position", 1)
+    if len(section) < 2:
+        return None
+    values = {}
+    for axis in ("x", "y", "z"):
+        # 과학적 표기(6.26e-05)의 지수 음수 부호까지 받아야 한다.
+        match = re.search(axis + r":\s*(-?[0-9.]+(?:[eE][-+]?[0-9]+)?)",
+                          section[1])
+        if match:
+            values[axis] = float(match.group(1))
+    return values if len(values) == 3 else None
+
+
+def reset_world_for_next_run():
+    """다음 판을 위해 어뢰를 지우고 ROV를 원점으로 되돌린다."""
+    gz_remove_model("glider_slocum")
+    time.sleep(2)
+    if not gz_reset_pose("bluerov2", 0.0, 0.0, -1.0):
+        return False
+    # 속도가 남아 있으면 원점에서 다시 밀려난다. 잦아들 때까지 재시도한다.
+    for _ in range(10):
+        time.sleep(1)
+        pose = gz_model_pose("bluerov2")
+        if pose and abs(pose["x"]) < 2.0 and abs(pose["y"]) < 2.0:
+            return True
+        gz_reset_pose("bluerov2", 0.0, 0.0, -1.0)
+    return False
+
+
+def spawn_trajectory_recorders(run_id, processes):
+    """어뢰와 ROV의 궤적을 CSV로 남긴다.
+
+    지금 로그에는 어뢰 속도·추력만 있고 자세나 위치가 없어서, 어뢰의
+    실제 선회반경이나 유도 시상수를 사후에 계산할 수 없다. 이걸 남겨두면
+    추가 실험 없이 아래를 뽑을 수 있다:
+      - 실제 선회율 / 선회반경 (model.sdf 1차근사와 대조)
+      - 유도 시상수 (ROV가 비켰을 때 어뢰가 따라잡는 데 걸리는 시간)
+      - 최근접 시점의 상대 기하
+    """
+    for name, topic in (("torpedo", "/torpedo/state/odometry"),
+                        ("bluerov", "/model/bluerov2/odometry")):
+        path = RESULTS / f"{run_id}_{name}_traj.csv"
+        processes.append(spawn_background(
+            f"ros2 topic echo --csv {topic} nav_msgs/msg/Odometry", path))
+
+
 def spawn_background(command, logfile=None):
     """백그라운드 프로세스를 띄운다(창 없이)."""
     handle = open(logfile, "w") if logfile else subprocess.DEVNULL
@@ -218,7 +358,8 @@ def stop(process):
 
 
 def run_once(scenario, planner, mode, fire_delay=2.0, watch=45.0,
-             reuse_gazebo=False, speed="fast", scaling=None):
+             reuse_gazebo=False, speed="fast", scaling=None,
+             keep_gazebo=False):
     """실험 한 판. 결과 dict를 돌려준다.
 
     scaling을 주면(torpedo_scaling.scale() 결과) 어뢰 시작좌표·추력·관찰시간을
@@ -228,8 +369,18 @@ def run_once(scenario, planner, mode, fire_delay=2.0, watch=45.0,
     if scaling:
         # 발사거리와 방향에서 시작좌표를 만든다. 방향마다 거리가 같아야
         # 방향끼리 공정하게 비교된다.
-        tx, ty, tz, tyaw = torpedo_scaling.scenario_start(
-            scenario, scaling["launch_sim"])
+        # 발사거리는 방향마다 다르게 잡는다. 접근속도가 정면 8.4 m/s,
+        # 후방 1.4 m/s로 6배 차이나서 거리를 같게 두면 후방은 판정시간
+        # 안에 붙지도 못한다(실측: rear/백상어 교전 0회). 대신 "발사 후
+        # 약 20초에 교전이 시작된다"를 방향마다 맞춘다.
+        launch = torpedo_scaling.launch_for_direction(
+            scenario, scaling["speed_sim"])
+        if launch is None:
+            warn(f"   {scenario} 방향은 이 어뢰 속도로 추격이 불가능하다 "
+                 f"— 건너뛴다")
+            return {"run_id": "-", "outcome": "INVALID_NO_PURSUIT",
+                    "distance": None, "plans": 0, "passes": 0}
+        tx, ty, tz, tyaw = torpedo_scaling.scenario_start(scenario, launch)
         # 임무거리도 축척에서 나온다. 판정이 끝날 때까지 ROV가 계속
         # 기동할 수 있는 길이라야 한다(아래에서 다시 검사한다).
         gx, gy, gz = 0.0, -round(scaling["mission_sim"], 1), -1.0
@@ -252,7 +403,7 @@ def run_once(scenario, planner, mode, fire_delay=2.0, watch=45.0,
     planner_log = RESULTS / f"{run_id}_planner.log"
     torpedo_log = RESULTS / f"{run_id}_torpedo.log"
 
-    log(f"── [{combo_label(index)}] {scenario}/{planner}/"
+    log(f"── [{combo_label(index, planner)}] {scenario}/{planner}/"
         f"모드{mode}({TORPEDO_MODES[mode]})"
         f"/{speed_key}({speed_label}) — {description}")
 
@@ -312,6 +463,8 @@ def run_once(scenario, planner, mode, fire_delay=2.0, watch=45.0,
             warn("   브리지가 odometry를 못 내보냄")
             return {"run_id": run_id, "outcome": "FAIL_BRIDGE"}
         log("   통합 노드 준비 완료")
+        # 궤적 기록은 토픽이 살아난 뒤에 시작해야 첫 샘플부터 잡힌다.
+        spawn_trajectory_recorders(run_id, processes)
         time.sleep(3)
 
         result = run_ros(
@@ -419,9 +572,21 @@ def run_once(scenario, planner, mode, fire_delay=2.0, watch=45.0,
                     log(f"   피격 — {passes}회차 공격에서 (최근접 "
                         f"{distance} m)")
                     break
+                # 공격 3회를 버텼으면 그 자리에서 회피 성공으로 끝낸다.
+                # 교전 종료([AVOIDED])가 3번 찍혔거나, 4번째 교전이
+                # 시작됐으면 3회를 넘긴 것이다. 어뢰가 교전반경 안에
+                # 계속 붙어 있으면 [AVOIDED]가 안 찍히므로 두 조건을
+                # 모두 본다.
+                if (len(re.findall(r"\[AVOIDED\]", text)) >= SURVIVE_TARGET
+                        or len(re.findall(r"engagement started", text))
+                        > SURVIVE_TARGET):
+                    outcome = "SURVIVED"
+                    log(f"   공격 {SURVIVE_TARGET}회 생존 — 판정 종료")
+                    break
 
-            if outcome != "HIT":
+            if outcome == "TIMEOUT":
                 # === 연료 소진 ===
+                # 3회를 채우지 못한 채 관찰 시간이 끝난 경우에만 온다.
                 # 시뮬레이터에는 연료 모델이 없어 어뢰가 무한히 달린다.
                 # 그래서 축척에서 계산한 운행시간이 지나면 스페이스(=
                 # ThrottleStop)를 넣어 추력을 0으로 만든다. 어뢰 코드는
@@ -451,10 +616,17 @@ def run_once(scenario, planner, mode, fire_delay=2.0, watch=45.0,
                 # 보면 정상적인 회피 성공을 무효 처리하게 된다.
                 text = planner_log.read_text(errors="ignore")
                 attacks = len(re.findall(r"engagement started", text))
+                # 어뢰 odometry가 끊기면 코어가 "회피 성공"으로 마감한다.
+                # 정상 실행에서는 어뢰가 사라지지 않으므로, 이 문구는
+                # 강제 종료나 노드 이상의 흔적이다. 가짜 성공을 거른다.
+                interrupted = "torpedo lost during engagement" in text
                 margins = [float(v) for v in re.findall(
                     r"\[AVOIDED\].*?min distance ([0-9.]+) m", text)]
                 passes = attacks
-                if attacks:
+                if interrupted:
+                    outcome = "INVALID_INTERRUPTED"
+                    warn("   어뢰 신호가 끊겼다(강제 종료 의심) — 결과 무효")
+                elif attacks:
                     outcome = "AVOIDED"
                     if margins:
                         distance = min(margins)
@@ -463,11 +635,20 @@ def run_once(scenario, planner, mode, fire_delay=2.0, watch=45.0,
                     else:
                         # 교전이 끝나지 않은 채 연료가 말랐다. 최근접거리는
                         # 코어가 교전 종료 때만 로그하므로 알 수 없다.
+                        # 코어가 교전 중에도 최소 이격을 남긴다
+                        # ([CLOSEST]). 교전이 안 끝나도 이 값으로 아슬아슬한
+                        # 생존과 여유 있는 생존을 구분할 수 있다.
+                        running = re.findall(r"\[CLOSEST\] ([0-9.]+) m", text)
                         entry = re.search(
                             r"engagement started \(torpedo ([0-9.]+) m", text)
-                        log(f"   연료 소진까지 생존 — 교전 지속 중 종료 "
-                            f"(진입 {entry.group(1) if entry else '?'} m, "
-                            f"최근접 미상)")
+                        if running:
+                            distance = float(running[-1])
+                            log(f"   연료 소진까지 생존 — 교전 지속 중 종료 "
+                                f"(최근접 {distance} m)")
+                        else:
+                            log(f"   연료 소진까지 생존 — 교전 지속 중 종료 "
+                                f"(진입 {entry.group(1) if entry else '?'} m, "
+                                f"최근접 미상)")
                 else:
                     # 어뢰가 교전반경(30 m) 안에 한 번도 못 들어왔다.
                     # 회피 성능을 잰 판이 아니다.
@@ -489,14 +670,37 @@ def run_once(scenario, planner, mode, fire_delay=2.0, watch=45.0,
                    if distance else f" (계획 {plan_count}회)"))
 
         child.close(force=True)
-        return {"run_id": run_id, "scenario": scenario, "planner": planner,
-                "mode": mode, "speed": speed_key, "outcome": outcome,
-                "distance": distance, "plans": plan_count,
-                "passes": passes, "log": planner_log}
+        # 피격이 몇 회차 공격이었는지 (HIT 이전의 교전 진입 수).
+        hit_at = 0
+        if outcome == "HIT":
+            text = planner_log.read_text(errors="ignore")
+            before = text.split("[HIT]")[0]
+            hit_at = len(re.findall(r"engagement started", before))
+
+        result = {"run_id": run_id, "scenario": scenario, "planner": planner,
+                  "mode": mode, "speed": speed_key, "outcome": outcome,
+                  "distance": distance, "plans": plan_count,
+                  "passes": passes, "hit_at": hit_at, "log": planner_log}
+        append_result({
+            "번호": combo_label(index, planner),
+            "시각": datetime.now().strftime("%m-%d %H:%M"),
+            "시나리오": scenario, "플래너": planner, "모드": mode,
+            "어뢰": speed_key, "결과": outcome,
+            "최근접m": f"{distance:.2f}" if distance else "",
+            "피격회차": hit_at or "",
+            "교전횟수": passes, "계획횟수": plan_count,
+            "판정시간s": f"{watch:.0f}",
+            "발사거리m": f"{abs(ty) if scenario in ('front', 'rear') else round((tx**2+ty**2)**0.5):.0f}",
+            "목적지m": f"{abs(gy):.0f}", "run_id": run_id,
+        })
+        return result
     finally:
         for process in reversed(processes):
             stop(process)
-        cleanup(kill_gazebo=not reuse_gazebo)
+        # "이 판이 Gazebo를 띄웠는가"(reuse_gazebo)와 "다음 판을 위해
+        # 남겨둘 것인가"(keep_gazebo)는 다르다. 예전엔 하나로 묶여 있어
+        # 첫 판이 항상 Gazebo를 죽였고, 그래서 재사용이 매번 실패했다.
+        cleanup(kill_gazebo=not keep_gazebo)
 
 
 # ── 대화형 모드(--step) ──────────────────────────────────────────────────────
@@ -597,15 +801,33 @@ def all_combos():
             for m in TORPEDO_MODES for v in torpedo_scaling.TORPEDOES]
 
 
+def planner_combos(planner):
+    """한 플래너의 조합을 정해진 순서로 나열한다(시나리오 -> 모드 -> 어뢰).
+
+    4 x 2 x 3 = 24회. 플래너마다 1번부터 세므로, hybrid 처럼 48회 표에
+    없는 플래너도 고유 번호를 갖는다. 예전에는 모두 "번외"로 찍혀
+    결과를 남에게 보낼 때 어느 판인지 알 수 없었다.
+    """
+    return [(s, planner, m, v) for s in SCENARIOS
+            for m in TORPEDO_MODES for v in torpedo_scaling.TORPEDOES]
+
+
 def combo_index(scenario, planner, mode, speed_key):
-    """이 조합이 48회 중 몇 번째인지. 표에 없는 조합(hybrid 등)은 0."""
+    """이 조합이 해당 플래너의 몇 번째인지. 못 찾으면 0."""
     key = (scenario, planner, mode, speed_key)
-    combos = all_combos()
+    combos = planner_combos(planner)
     return combos.index(key) + 1 if key in combos else 0
 
 
-def combo_label(index):
-    return f"{index:02d}/{len(all_combos())}" if index else "번외"
+def combo_total(planner):
+    return len(planner_combos(planner))
+
+
+def combo_label(index, planner=None):
+    if not index:
+        return "번외"
+    total = combo_total(planner) if planner else len(all_combos())
+    return f"{index:02d}/{total}"
 
 
 def combo_speeds(args):
@@ -635,7 +857,8 @@ def run_step_mode(args):
     """조합을 한 판씩 돌리며 사용자 판단을 받는다."""
     # 인자를 주면 그 축만 돌린다(예: rear만, dvo만). 안 주면 전체 조합.
     scenarios = [args.scenario] if args.scenario else list(SCENARIOS)
-    planners = [args.planner] if args.planner else PLANNERS
+    planners = ([args.planner] if args.planner
+                else (args.planners.split(",") if args.planners else PLANNERS))
     modes = [args.mode] if args.mode else list(TORPEDO_MODES)
     speeds = combo_speeds(args)
     combos = [(s, p, m, v) for s in scenarios for p in planners
@@ -646,6 +869,8 @@ def run_step_mode(args):
         STEP_CSV.unlink()
         warn("기존 기록을 지우고 처음부터 시작합니다.")
 
+    if args.limit:
+        combos = combos[:args.limit]
     remaining = [c for c in combos if c not in done]
     if not remaining:
         log(f"모든 조합({len(combos)}개)이 이미 기록되어 있습니다.")
@@ -721,6 +946,83 @@ def show_step_results():
               f"{row['memo']}")
     print(f"\n* = 자동판정과 다르게 정정한 판")
     print(f"기록: {STEP_CSV}\n")
+
+
+def show_report():
+    """결과를 한 화면에 정리한다 — 진도, 판별 표, 요약 통계.
+
+    results.csv 를 읽으므로 로그를 다시 파싱하지 않고, 배치를 중간에
+    멈춰도 그때까지의 결과가 그대로 나온다.
+    """
+    path = RESULTS / "results.csv"
+    if not path.exists():
+        warn(f"결과 파일이 없다: {path}")
+        return
+    with open(path, newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    if not rows:
+        warn("결과가 비어 있다")
+        return
+
+    total = len(all_combos())
+    invalid = [r for r in rows if r["결과"].startswith("INVALID") or
+               r["결과"].startswith("FAIL")]
+    valid = [r for r in rows if r not in invalid]
+    hits = [r for r in valid if r["결과"] == "HIT"]
+
+    print(f"\n{'='*78}")
+    print(f"  실험 결과  —  {len(rows)}/{total}판 실행, "
+          f"유효 {len(valid)}판, 무효 {len(invalid)}판")
+    print(f"{'='*78}\n")
+
+    print(f"{'번호':<8}{'방향':<7}{'플래너':<7}{'모드':<5}{'어뢰':<14}"
+          f"{'결과':<12}{'최근접':<8}{'회차':<6}{'교전':<5}{'계획'}")
+    print("─" * 78)
+    for r in rows:
+        mark = "✗" if r["결과"] == "HIT" else (
+            "·" if r["결과"].startswith(("INVALID", "FAIL")) else "○")
+        print(f"{r['번호']:<8}{r['시나리오']:<7}{r['플래너']:<7}"
+              f"{r['모드']:<5}{r['어뢰']:<14}{mark + ' ' + r['결과']:<12}"
+              f"{r['최근접m'] or '-':<8}{r['피격회차'] or '-':<6}"
+              f"{r['교전횟수']:<5}{r['계획횟수']}")
+
+    if not valid:
+        print("\n유효한 판이 없다.")
+        return
+
+    def rate(subset):
+        if not subset:
+            return "  -  "
+        survived = sum(1 for r in subset if r["결과"] != "HIT")
+        return f"{survived}/{len(subset)} ({survived*100//len(subset)}%)"
+
+    print(f"\n{'─'*78}\n  회피 성공률 (무효 판 제외)\n")
+    for label, key, values in [
+        ("유도 모드", "모드", sorted({r["모드"] for r in valid})),
+        ("플래너", "플래너", sorted({r["플래너"] for r in valid})),
+        ("방향", "시나리오", [d for d in SCENARIOS
+                            if any(r["시나리오"] == d for r in valid)]),
+        ("어뢰", "어뢰", [t for t in torpedo_scaling.TORPEDOES
+                        if any(r["어뢰"] == t for r in valid)]),
+    ]:
+        cells = "  ".join(
+            f"{v}: {rate([r for r in valid if r[key] == v])}" for v in values)
+        print(f"  {label:<10}{cells}")
+
+    if hits:
+        rounds = [int(r["피격회차"]) for r in hits if r["피격회차"]]
+        margins = [float(r["최근접m"]) for r in hits if r["최근접m"]]
+        print(f"\n  피격 {len(hits)}판 — "
+              f"평균 {sum(rounds)/len(rounds):.1f}회차, "
+              f"최근접 평균 {sum(margins)/len(margins):.2f} m "
+              f"(범위 {min(margins):.2f}~{max(margins):.2f})")
+    if invalid:
+        kinds = {}
+        for r in invalid:
+            kinds[r["결과"]] = kinds.get(r["결과"], 0) + 1
+        print(f"  무효 {len(invalid)}판 — " +
+              ", ".join(f"{k} {v}" for k, v in kinds.items()))
+    print(f"\n  결과 파일: {path}\n")
 
 
 def show_coverage():
@@ -800,7 +1102,7 @@ def summarize():
             outcome = "무효(계획0)"
         index = combo_index(scenario, planner,
                             int(mode) if mode.isdigit() else 0, speed)
-        print(f"{combo_label(index):<8}{scenario:<9}{planner:<8}"
+        print(f"{combo_label(index, planner):<8}{scenario:<9}{planner:<8}"
               f"{mode_label:<18}{speed:<14}{outcome:<10}{distance:<9}"
               f"{(f'{sum(times)/len(times):.2f}' if times else '-'):<8}"
               f"{(str(max(boxes)) if boxes else '-'):<6}{vo_fail}")
@@ -920,9 +1222,22 @@ def main():
     parser.add_argument("--search", type=float,
                         help="어뢰가 탐색 단계에서 소모하는 연료 비율. "
                              "생략하면 어뢰별 기본값(경어뢰 0.40 / 중어뢰 0.50)")
-    parser.add_argument("--passes", type=int,
-                        help="재공격 N회까지만 보고 끊는다. 생략하면 "
-                             "연료 소진까지 본다")
+    # 판정 기준은 재공격 3회 절단으로 고정한다. 판마다 다르면 결과를
+    # 비교할 수 없으므로 도움말에서 숨겨 실수로 바뀌지 않게 한다.
+    parser.add_argument("--passes", type=int, default=3,
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--planners",
+                        help="배치에서 돌릴 플래너를 쉼표로 지정 "
+                             "(예: hybrid 또는 astar,hybrid). 생략하면 "
+                             "기본 비교군(astar,dvo)")
+    # scenario/mode 는 위치 인자라 앞의 것을 건너뛰고 지정할 수 없다.
+    # 배치에서 한 축만 좁혀 돌 때 쓰라고 따로 둔다.
+    parser.add_argument("--scenarios",
+                        help="배치에서 돌릴 방향을 쉼표로 지정 "
+                             "(예: front 또는 front,rear). 생략하면 전부")
+    parser.add_argument("--modes",
+                        help="배치에서 돌릴 어뢰 모드를 쉼표로 지정 "
+                             "(예: 3 또는 2,3). 생략하면 둘 다")
     parser.add_argument("--legacy-speed", action="store_true",
                         help="--step/--batch에서 예전 slow/mid/fast를 쓴다. "
                              "생략하면 어뢰 3종(축척 기반)")
@@ -931,13 +1246,28 @@ def main():
     parser.add_argument("--scale-info", action="store_true",
                         help="축척표만 출력하고 끝낸다")
     parser.add_argument("--batch", action="store_true", help="전체 조합 자동 실행")
+    parser.add_argument("--limit", type=int,
+                        help="--batch/--step에서 이 판 수만 돌리고 멈춘다")
+    # Gazebo 재사용은 포기했다. set_pose가 위치만 옮기고 속도는 지우지
+    # 못해서, -3 m/s로 달리던 ROV를 원점에 놓아도 곧바로 밀려난다.
+    # 속도를 지우려면 월드 전체 리셋이 필요한데 ros_gz 브리지가 깨질
+    # 위험이 있다. 3시간에서 36분 아끼자고 감수할 위험이 아니다.
+    # 관련 함수(gz_remove_model / gz_reset_pose / reset_world_for_next_run)는
+    # 다른 용도로 쓸 수 있어 남겨 뒀다.
+    parser.add_argument("--reuse-gazebo", action="store_true",
+                        help=argparse.SUPPRESS)
     parser.add_argument("--step", action="store_true",
                         help="한 판씩 실행하고 RViz로 보며 판정·메모 (중단/재개 가능)")
     parser.add_argument("--restart", action="store_true",
                         help="--step 기록을 지우고 처음부터")
+    parser.add_argument("--build", action="store_true",
+                        help="실행 전에 워크스페이스 루트에서 필요한 패키지를 "
+                             "빌드한다(경로를 알아서 잡는다)")
     parser.add_argument("--summary", action="store_true", help="결과 표 출력")
     parser.add_argument("--coverage", action="store_true",
                         help="48조합 중 무엇을 했고 무엇이 남았는지")
+    parser.add_argument("--report", action="store_true",
+                        help="결과를 한 화면에 정리 (표 + 성공률 통계)")
     parser.add_argument("--fire-delay", type=float, default=2.0,
                         help="목표 발행 후 발사까지 대기(초). 길면 ROV가 멀어져 "
                              "어뢰가 불리해진다(3 m/s x 대기초 만큼 앞서감)")
@@ -967,6 +1297,10 @@ def main():
             print()
         return
 
+    if args.report:
+        show_report()
+        return
+
     if args.coverage:
         show_coverage()
         return
@@ -981,10 +1315,15 @@ def main():
         sys.exit(f"manta.sh 없음: {MANTA_SH}")
 
     stale = check_builds_fresh()
+    if stale and args.build:
+        warn(f"소스가 빌드보다 최신입니다: {', '.join(stale)} — 빌드합니다")
+        if not build_packages():
+            sys.exit(1)
+        stale = check_builds_fresh()
     if stale:
         warn(f"소스가 빌드보다 최신입니다: {', '.join(stale)}")
-        warn("옛 바이너리로 실험하면 결과가 무효가 됩니다. 먼저 빌드하세요:")
-        warn(f"  cd {WORKSPACE} && colcon build --packages-select {' '.join(stale)}")
+        warn("옛 바이너리로 실험하면 결과가 무효가 됩니다.")
+        warn("  --build 를 붙이면 알아서 빌드하고 이어서 실행합니다.")
         sys.exit(1)
 
     if args.step:
@@ -993,19 +1332,49 @@ def main():
 
     if args.batch:
         speeds = combo_speeds(args)
-        combos = [(s, p, m, v) for s in SCENARIOS for p in PLANNERS
-                  for m in TORPEDO_MODES for v in speeds]
+        planners = (args.planners.split(",") if args.planners else PLANNERS)
+        scenarios = (args.scenarios.split(",") if args.scenarios
+                     else list(SCENARIOS))
+        modes = ([int(m) for m in args.modes.split(",")] if args.modes
+                 else list(TORPEDO_MODES))
+        combos = [(s, p, m, v) for s in scenarios for p in planners
+                  for m in modes for v in speeds]
+        if args.limit:
+            combos = combos[:args.limit]
+            log(f"{len(combos)}회만 실행 (--limit)")
         log(f"전체 {len(combos)}회 시작")
+        # Gazebo 재사용: 첫 판만 띄우고, 이후는 어뢰를 지우고 ROV를 원점으로
+        # 되돌려 이어 쓴다. 초기화가 실패하면 그 판부터 다시 띄운다.
+        gazebo_alive = False
         for index, (scenario, planner, mode, speed) in enumerate(combos, 1):
             log(f"[{index}/{len(combos)}]")
+            reuse = False
+            if args.reuse_gazebo and gazebo_alive:
+                log("   Gazebo 재사용 — 어뢰 제거 후 ROV 원점 복귀...")
+                if reset_world_for_next_run():
+                    reuse = True
+                    log("   초기화 성공")
+                else:
+                    warn("   초기화 실패 — Gazebo를 다시 띄운다")
+                    gazebo_alive = False
             try:
                 scaling = scaling_for(speed, args)
                 watch = (scaling["judge_time"] if scaling else args.watch)
-                run_once(scenario, planner, mode,
-                         args.fire_delay, watch, speed=speed, scaling=scaling)
+                # 마지막 판이 아니면 Gazebo를 남겨 다음 판에서 재사용한다.
+                keep = args.reuse_gazebo and index < len(combos)
+                result = run_once(scenario, planner, mode,
+                                  args.fire_delay, watch, speed=speed,
+                                  scaling=scaling, reuse_gazebo=reuse,
+                                  keep_gazebo=keep)
+                if args.reuse_gazebo and not str(
+                        result.get("outcome", "")).startswith("FAIL"):
+                    gazebo_alive = True
             except Exception as error:  # 한 판이 죽어도 나머지는 계속
                 warn(f"실패: {error}")
-        summarize()
+                gazebo_alive = False
+        if gazebo_alive:
+            cleanup(kill_gazebo=True)
+        show_report()
         return
 
     # --torpedo를 쓰면 속도는 축척에서 나오므로 묻지 않는다.

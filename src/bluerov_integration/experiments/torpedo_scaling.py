@@ -284,6 +284,37 @@ DIRECTIONS = {
 }
 
 
+# 교전 진입까지 목표 시간(초). 방향마다 접근속도가 크게 달라(정면 8.4 m/s,
+# 후방 1.4 m/s) 발사거리를 같게 두면 후방은 판정시간 안에 붙지도 못한다
+# (실측: rear/백상어 교전 0회). 그래서 거리를 고정하는 대신 "발사 후 이만큼
+# 지나면 교전이 시작된다"를 고정한다. 방향끼리 비교가 공정해진다.
+ENGAGE_DELAY_SEC = 20.0
+ENGAGE_RADIUS = 30.0     # planning.avoid.engage_radius 와 같아야 한다
+
+
+def closing_speed(direction, torpedo_speed, rov_speed=ROV_SPEED):
+    """시선(LOS) 방향 접근속도. 방위각으로 ROV 속도 성분을 더한다.
+
+      정면(0도)   : v_t + v_rov   (마주 봄)
+      측면(90도)  : v_t           (ROV 속도가 시선에 직교)
+      후방(180도) : v_t - v_rov   (도망감)
+    """
+    bearing = math.radians(DIRECTIONS[direction][0])
+    return torpedo_speed + rov_speed * math.cos(bearing)
+
+
+def launch_for_direction(direction, torpedo_speed,
+                         delay_sec=ENGAGE_DELAY_SEC):
+    """그 방향에서 delay_sec 뒤에 교전이 시작되도록 하는 발사거리.
+
+    접근속도가 너무 낮으면(추격 불가) None을 돌려준다.
+    """
+    closing = closing_speed(direction, torpedo_speed)
+    if closing <= 0.2:
+        return None
+    return ENGAGE_RADIUS + closing * delay_sec
+
+
 def scenario_start(direction, launch_m, depth=-1.0):
     """방향과 발사거리로 어뢰 시작 위치·yaw를 만든다.
 

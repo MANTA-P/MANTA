@@ -13,9 +13,8 @@ namespace
 {
 
 constexpr double kPi = 3.14159265358979323846;
-constexpr double kGoalWeight = 3.0;
-constexpr double kVelocityWeight = 0.35;
-constexpr double kClearanceWeight = 1.0;
+// 가중치는 DynamicVOOptions 로 옮겼다(국면별로 바꿔야 하므로).
+// 기본값이 예전 상수와 같아 평상시 동작은 그대로다.
 
 Point3D add(const Point3D & first, const Point3D & second)
 {
@@ -151,6 +150,65 @@ std::vector<Point3D> candidateVelocities(
   return candidates;
 }
 
+// 시선(LOS)에 수직인 속도 성분이 클수록 낮은 비용.
+//
+// 비례항법의 소요 횡가속 a = N x Vc x lambda_dot 에서, 회피자가 키울 수
+// 있는 것은 시선각속도 lambda_dot 뿐이다. 후보 속도에서 시선 성분을
+// 빼면 남는 것이 시선각속도를 만드는 성분이다. 거리로 나누지 않는 이유는
+// 급기동 국면 자체가 이미 근거리로 한정돼 있고, 나누면 후보 간 비교가
+// 거리에 휘둘려 불안정해지기 때문이다.
+//
+// 최대속도로 정규화해 [0, 1] 로 만든다. 완전 횡기동이면 0, 시선 방향
+// (접근이든 도주든)이면 1 이다.
+double beamCost(
+  const Point3D & position,
+  const Point3D & candidate,
+  const Point3D & previous_velocity,
+  const std::vector<MovingObstacle> & obstacles,
+  const DynamicVOOptions & options)
+{
+  // 가장 가까운 장애물을 위협으로 본다. 통로 박스 중 선두가 어뢰의
+  // 현재 위치이므로, 최근접 박스가 곧 시선의 기준점이다.
+  const MovingObstacle * threat = nullptr;
+  double nearest = std::numeric_limits<double>::infinity();
+  for (const auto & obstacle : obstacles) {
+    const double range = length(subtract(obstacle.shape.center, position));
+    if (range < nearest) {
+      nearest = range;
+      threat = &obstacle;
+    }
+  }
+  if (threat == nullptr || nearest < 1.0e-6) {
+    return 0.0;
+  }
+  const Point3D los = normalized(subtract(threat->shape.center, position));
+  const Point3D perpendicular =
+    subtract(candidate, scale(los, dot(candidate, los)));
+  const double reference = std::max(options.max_horizontal_speed, 1.0e-9);
+
+  // 평상시 급기동: 시선에 수직인 성분이 크기만 하면 된다(방향 무관).
+  if (!options.break_reverse) {
+    return 1.0 - std::clamp(length(perpendicular) / reference, 0.0, 1.0);
+  }
+
+  // 반전(jink): 직전에 가던 횡방향의 '반대'로 갈수록 좋다.
+  //
+  // 한 방향으로만 계속 피하면 비례항법이 그 해를 수렴시킨다. 뒤집으면
+  // 어뢰가 따라잡아야 할 횡속도 변화가 두 배(3.0 -> 6.0 m/s)가 된다.
+  const Point3D previous_perpendicular = subtract(
+    previous_velocity, scale(los, dot(previous_velocity, los)));
+  const double previous_lateral = length(previous_perpendicular);
+  if (previous_lateral < 0.5) {
+    // 아직 횡방향으로 가고 있지 않다. 뒤집을 것이 없으므로 평상시와 같다.
+    return 1.0 - std::clamp(length(perpendicular) / reference, 0.0, 1.0);
+  }
+  const Point3D previous_direction =
+    scale(previous_perpendicular, 1.0 / previous_lateral);
+  // 반대 방향이면 양수. 같은 방향이면 음수라 비용이 1 을 넘어 탈락한다.
+  const double opposing = -dot(perpendicular, previous_direction);
+  return 1.0 - std::clamp(opposing / reference, -1.0, 1.0);
+}
+
 std::optional<Point3D> chooseVelocity(
   const Point3D & position,
   const Point3D & goal,
@@ -166,36 +224,90 @@ std::optional<Point3D> chooseVelocity(
     -options.max_vertical_speed, options.max_vertical_speed);
   preferred = clampVelocity(preferred, options);
 
+  const std::vector<Point3D> candidates =
+    candidateVelocities(preferred, previous_velocity, options);
+  const DynamicVOWeights & weights =
+    options.break_mode ? options.break_weights : options.weights;
+
+  // 후보의 최소 여유(예측 이격 - 필요 이격). 음수면 충돌 예측이다.
+  const auto marginOf = [&](const Point3D & candidate) {
+      double minimum = std::numeric_limits<double>::infinity();
+      for (const auto & obstacle : obstacles) {
+        const double separation = predictedSeparation(
+          position, candidate, obstacle.shape.center, obstacle.velocity,
+          options.prediction_horizon);
+        minimum = std::min(
+          minimum, separation - requiredClearance(obstacle, options));
+      }
+      return minimum;
+    };
+
+  // 1차: 충돌이 예측되지 않는 후보 중 최선.
   double best_score = std::numeric_limits<double>::infinity();
   std::optional<Point3D> best;
-  for (const Point3D & candidate :
-    candidateVelocities(preferred, previous_velocity, options))
-  {
-    const Point3D next_position = add(position, scale(candidate, options.rollout_step));
+  for (const Point3D & candidate : candidates) {
+    const Point3D next_position =
+      add(position, scale(candidate, options.rollout_step));
     if (!insideMap(next_position, map) ||
       collisionRisk(position, candidate, obstacles, options))
     {
       continue;
     }
 
-    double minimum_margin = std::numeric_limits<double>::infinity();
-    for (const auto & obstacle : obstacles) {
-      const double separation = predictedSeparation(
-        position, candidate, obstacle.shape.center, obstacle.velocity,
-        options.prediction_horizon);
-      minimum_margin = std::min(
-        minimum_margin, separation - requiredClearance(obstacle, options));
-    }
+    const double minimum_margin = marginOf(candidate);
     const double goal_cost = distance3D(next_position, goal);
-    const double velocity_cost =
-      length(subtract(candidate, preferred)) +
-      0.5 * length(subtract(candidate, previous_velocity));
+    const double preferred_cost = length(subtract(candidate, preferred));
+    const double continuity_cost =
+      length(subtract(candidate, previous_velocity));
     const double clearance_cost = obstacles.empty() ? 0.0 :
       1.0 / std::max(minimum_margin, 0.05);
-    const double score = kGoalWeight * goal_cost +
-      kVelocityWeight * velocity_cost + kClearanceWeight * clearance_cost;
+    // beam 이 0 이면(평상시) 계산 자체를 건너뛴다. 후보마다 도는
+    // 루프라 불필요한 비용을 넣지 않는다.
+    const double beam_cost = weights.beam == 0.0 ? 0.0 :
+      beamCost(position, candidate, previous_velocity, obstacles, options);
+    const double score = weights.goal * goal_cost +
+      weights.preferred * preferred_cost +
+      weights.continuity * continuity_cost +
+      weights.clearance * clearance_cost +
+      weights.beam * beam_cost;
     if (score < best_score) {
       best_score = score;
+      best = candidate;
+    }
+  }
+  if (best) {
+    return best;
+  }
+
+  // 2차: 충돌을 피하는 후보가 하나도 없을 때.
+  //
+  // collisionRisk 는 예측 구간(prediction_horizon 6초) 안에 충돌하면
+  // 후보를 버린다. 그런데 TTC 가 1~2초로 줄면 어떤 속도를 골라도 6초
+  // 안에 충돌이 예측되므로 후보가 전멸한다. 그러면 호출자가 경로를
+  // 못 만들어 ROV 를 정지시키는데, 유도어뢰 앞에서 정지는 가능한
+  // 최악의 선택이다. 실측(hybrid 9판): 종말 구간에서 계획이 거의 못
+  // 돈 4판은 전부 피격, 계획이 돈 5판은 전부 회피였다.
+  //
+  // 그래서 포기하지 않고 "가장 덜 나쁜" 속도를 고른다. 목표·선호·연속성
+  // 항은 버린다 — 충돌이 확실한 상황에서 목표로 가려는 힘은 해롭다.
+  // 남길 것은 여유(음수라도 큰 쪽이 낫다)와, 급기동이면 시선각속도다.
+  double least_bad = -std::numeric_limits<double>::infinity();
+  for (const Point3D & candidate : candidates) {
+    const Point3D next_position =
+      add(position, scale(candidate, options.rollout_step));
+    if (!insideMap(next_position, map)) {
+      continue;   // 맵 밖은 여전히 안 된다
+    }
+    // 여유는 클수록, 시선각속도는 클수록 좋다. beamCost 는 완전
+    // 횡기동이 0, 시선 방향이 1 이므로 부호를 뒤집어 더한다.
+    double utility = marginOf(candidate);
+    if (weights.beam > 0.0) {
+      utility += weights.beam *
+        (1.0 - beamCost(
+          position, candidate, previous_velocity, obstacles, options));
+    }
+    if (utility > least_bad) {
+      least_bad = utility;
       best = candidate;
     }
   }

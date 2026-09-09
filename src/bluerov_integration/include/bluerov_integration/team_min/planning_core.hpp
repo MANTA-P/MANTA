@@ -7,8 +7,10 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <limits>
 
 #include "bluerov_integration/team_min/planning_types.hpp"
+#include "bluerov_integration/team_min/torpedo_guidance.hpp"
 
 namespace bluerov_integration::team_min
 {
@@ -87,6 +89,17 @@ private:
     bool torpedo_detected,
     const Point3D & rov_position,
     Decision & decision);
+  // TTC(충돌까지 남은 시간)와 접근속도를 시선(LOS) 방향으로 구한다.
+  // 멀어지는 중이면 무한을 돌려준다.
+  double timeToCollision(
+    const Point3D & rov_position,
+    const Point3D & torpedo_position,
+    double * closing_out) const;
+
+  // TTC로 교전 국면을 갱신한다. 최소 체류시간 안에는 바꾸지 않는다.
+  void updatePhase(double ttc_sec, bool torpedo_detected,
+    double now_sec, Decision & decision);
+
   bool needsReplan(
     const PlanRequest & request,
     const std::vector<BoxObstacle> & obstacles,
@@ -96,6 +109,14 @@ private:
   PlanningCoreConfig config_;
 
   // Dynamic VO: map-frame ROV velocity estimate.
+  // 교전 국면과 그 진입 시각(최소 체류시간 판정용)
+  // 어뢰가 PN 인지 순수추적인지 온라인으로 식별해 곡선 궤적을 만든다.
+  TorpedoGuidancePredictor guidance_predictor_;
+
+  EngagementPhase phase_{EngagementPhase::kCruise};
+  double phase_entered_sec_{0.0};
+  bool have_phase_time_{false};
+
   bool have_robot_history_{false};
   bool have_robot_velocity_{false};
   std::uint64_t last_robot_sequence_{0};
@@ -119,6 +140,9 @@ private:
   bool avoid_mode_{false};
   bool engaged_{false};
   double engagement_min_distance_{0.0};
+  // 마지막으로 로그에 남긴 최소 이격. 갱신폭이 작을 때 로그가 넘치지
+  // 않도록 비교 기준으로만 쓴다.
+  double reported_min_distance_{std::numeric_limits<double>::infinity()};
   bool hit_latched_{false};
   double hit_distance_{0.0};
   std::uint64_t hit_mission_sequence_{0};

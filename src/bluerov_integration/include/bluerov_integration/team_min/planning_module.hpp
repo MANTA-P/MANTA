@@ -13,46 +13,13 @@
 #include <rclcpp/rclcpp.hpp>
 
 #include "bluerov_integration/common/data_types.hpp"
-#include "bluerov_integration/team_min/dynamic_vo_planner.hpp"
-#include "bluerov_integration/team_min/planning_core.hpp"
-#include "bluerov_integration/team_min/planning_types.hpp"
+#include "bluerov_integration/team_min/planning_config.hpp"
+#include "bluerov_integration/team_min/planning_engine.hpp"
 #include "bluerov_integration/team_min/rviz_visualizer.hpp"
 
 namespace bluerov_integration::team_min
 {
 
-// 통합 노드가 채우는 설정이다. 필드 배치는 기존과 동일하게 유지한다
-// (bluerov_integration_node.cpp가 평면 필드명으로 직접 접근한다).
-// 알고리즘 값은 어댑터가 PlanningCoreConfig로 옮겨 코어에 넘기고,
-// ROS 토픽명은 어댑터만 안다.
-struct PlanningConfig
-{
-  bool enabled{true};
-  bool use_dynamic_map{true};
-  bool use_target_topic_for_goal{true};
-  double goal_offset_x{100.0};
-  double goal_offset_y{0.0};
-  double goal_offset_z{0.0};
-  double map_padding_x{10.0};
-  double map_padding_y{15.0};
-  double map_padding_z{15.0};
-  double torpedo_replan_distance{0.5};
-  double robot_replan_distance{1.0};
-  double goal_replan_distance{0.1};
-  GridMapConfig fixed_map{};
-  AStarOptions astar{};
-  // Dynamic VO: local avoidance settings remain inside team_min.
-  DynamicVOOptions dynamic_vo{};
-  BoxObstacle torpedo_barrier{};
-  PredictionConfig prediction{};
-  ReplanPolicyConfig replan{};
-  AvoidConfig avoid{};
-  std::string path_topic{"/uuv/reference_path"};
-  std::string current_point_topic{"/uuv/current_position_point"};
-  std::string goal_point_topic{"/uuv/goal_point"};
-  std::string torpedo_point_topic{"/uuv/torpedo_center_point"};
-  std::string marker_topic{"/rviz/uuv_astar_markers"};
-};
 
 // ROS 어댑터다. "StateSnapshot -> PlanningInput 변환 -> PlanningCore 판단
 // -> Decision에 따른 발행/로그/마커"만 담당하고, 판단 로직은 전부
@@ -69,12 +36,6 @@ public:
   void stop();
 
 private:
-  // Dynamic VO: one worker item can refresh A* and always update local avoidance.
-  struct PlanningWork
-  {
-    PlanRequest request;
-    bool global_replan_required{false};
-  };
 
   static Point3D positionOf(const nav_msgs::msg::Odometry & odometry);
   static VehicleState toVehicleState(
@@ -85,8 +46,6 @@ private:
   void publishStopPath(const std::string & frame_id);
   void workerLoop();
   void execute(const PlanningWork & work);
-  // 알고리즘 분기는 여기 안에만 있다. 호출부는 PlanResult만 본다.
-  PlanResult runPlanner(const PlanningWork & work);
   // 계획 결과를 ROS로 내보낸다(여기부터 PathFollower -> PPID 파이프라인).
   void publishPlan(const PlanResult & result, const PlanRequest & request);
   // runPlanner가 돌려준 실패 사유를 ROS 로그로 옮긴다.
@@ -97,8 +56,6 @@ private:
     const std::string & frame_id);
 
   PlanningConfig config_;
-  // worker(execute)가 통로/맵 생성에 쓰는 코어 설정 사본이다(불변).
-  PlanningCoreConfig core_config_;
   rclcpp::Logger logger_;
   rclcpp::Clock::SharedPtr clock_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
@@ -109,6 +66,10 @@ private:
   // 판단 코어. planning 타이머(MutuallyExclusive)에서만 update()를
   // 부르므로 잠금 없이 쓴다. planning.enabled=false면 만들지 않는다.
   std::unique_ptr<PlanningCore> core_;
+  // 알고리즘 선택·조합과 전역 A* 경로 캐시는 순수 C++ 엔진이 소유한다.
+  std::unique_ptr<PlanningEngine> engine_;
+  // 런타임 플래너 변경 시 worker의 plan()과 reset()을 직렬화한다.
+  std::mutex engine_mutex_;
 
   // 실험 중 재실행 없이 알고리즘을 갈아끼운다:
   //   ros2 param set /bluerov_integration_node planning.planner dvo
@@ -124,10 +85,13 @@ private:
   // 마지막으로 발행한 경로다. worker가 쓰고 update()가 읽으므로
   // request_mutex_ 아래에서만 접근한다(코어에는 복사로 넘긴다).
   std::vector<Point3D> last_path_;
-  // Dynamic VO: worker-owned cached A* path; only complete paths replace it.
-  std::vector<Point3D> global_path_;
+  // 반전(jink)이 실제로 걸렸는지 로그로 남기기 위한 상태. 전환될 때만
+  // 찍어 로그가 넘치지 않게 한다.
+  bool reverse_active_{false};
   // 코어의 hit 래치 미러다. worker가 낡은 계획 결과의 발행을 억제할 때
   // 읽으므로 atomic으로 둔다.
+  // 마지막으로 로그한 유도법(바뀔 때만 알린다)
+  TorpedoGuidanceLaw last_guidance_{TorpedoGuidanceLaw::kUnknown};
   std::atomic<bool> hit_latched_{false};
 
   std::atomic<bool> running_{false};

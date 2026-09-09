@@ -14,11 +14,6 @@ namespace bluerov_integration::team_min
 namespace
 {
 
-// DVO 단독 모드가 내보낼 최소 waypoint 수다. 경로가 이보다 짧으면
-// PathFollower가 lookahead(기본 2 m)로 경로 끝을 넘어서고, 그 순간
-// "최종 목표 도달"로 판정해 미션 목표로 직행한다(회피 무시).
-// 롤아웃 한 구간이 최대 1.5 m(0.5 s x 3 m/s)이므로 5점이면 약 6 m다.
-constexpr std::size_t kMinimumDynamicVOWaypoints = 5U;
 
 double toSeconds(const std::chrono::steady_clock::time_point time_point)
 {
@@ -34,7 +29,7 @@ PlanningModule::PlanningModule(rclcpp::Node & node, PlanningConfig config)
 {
   // 파라미터 선언·로딩은 planning_params.cpp가 담당한다.
   loadTeamMinParameters(node, config_);
-  core_config_ = toCoreConfig(config_);
+  const PlanningCoreConfig core_config = toCoreConfig(config_);
 
   const auto latched_qos =
     rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
@@ -61,7 +56,7 @@ PlanningModule::PlanningModule(rclcpp::Node & node, PlanningConfig config)
   const auto parsed_planner = parsePlanner(planner_name);
   if (!parsed_planner) {
     throw std::invalid_argument(
-            "planning.planner must be one of: astar, dvo, hybrid");
+            "planning.planner must be one of: astar, dvo, hybrid, spacetime");
   }
   planner_.store(*parsed_planner);
   RCLCPP_INFO(
@@ -79,7 +74,8 @@ PlanningModule::PlanningModule(rclcpp::Node & node, PlanningConfig config)
         const auto requested = parsePlanner(parameter.as_string());
         if (!requested) {
           result.successful = false;
-          result.reason = "planning.planner must be astar, dvo, or hybrid";
+          result.reason =
+            "planning.planner must be astar, dvo, hybrid, or spacetime";
           continue;
         }
         const PlannerType previous = planner_.exchange(*requested);
@@ -88,7 +84,7 @@ PlanningModule::PlanningModule(rclcpp::Node & node, PlanningConfig config)
           {
             std::lock_guard<std::mutex> lock(request_mutex_);
             last_path_.clear();
-            global_path_.clear();
+            { std::lock_guard<std::mutex> engine_lock(engine_mutex_); engine_->reset(); }
             pending_request_.reset();
           }
           RCLCPP_INFO(
@@ -100,7 +96,11 @@ PlanningModule::PlanningModule(rclcpp::Node & node, PlanningConfig config)
     });
 
   // 설정 검증은 코어 생성자가 한다(잘못되면 std::invalid_argument).
-  core_ = std::make_unique<PlanningCore>(core_config_);
+  core_ = std::make_unique<PlanningCore>(core_config);
+  engine_ = std::make_unique<PlanningEngine>(
+    PlanningEngineConfig{
+      core_config, config_.dynamic_vo, config_.spacetime,
+      config_.spacetime_lookahead});
 
   running_.store(true);
   worker_ = std::thread(&PlanningModule::workerLoop, this);
@@ -224,10 +224,29 @@ void PlanningModule::handleDecision(
     RCLCPP_INFO(
       logger_, "team_min [RESET] new mission goal received; resuming");
   }
+  // 어뢰 유도법이 식별되면 한 번 알린다. 예측 모델이 맞는지 보는 지표다.
+  if (decision.torpedo_guidance != last_guidance_) {
+    last_guidance_ = decision.torpedo_guidance;
+    RCLCPP_INFO(
+      logger_,
+      "team_min torpedo guidance=%s (PN error=%.3f m, pursuit error=%.3f m)",
+      guidanceLawName(decision.torpedo_guidance),
+      decision.pn_prediction_error, decision.pursuit_prediction_error);
+  }
+  if (decision.phase_changed) {
+    RCLCPP_INFO(
+      logger_, "team_min phase: %s (TTC %.2f s, closing %.2f m/s)",
+      phaseName(decision.phase), decision.ttc_sec, decision.closing_speed);
+  }
   if (decision.engagement_started) {
     RCLCPP_INFO(
       logger_, "team_min engagement started (torpedo %.1f m away)",
       decision.engagement_distance);
+  }
+  if (decision.engagement_min_improved) {
+    RCLCPP_INFO(
+      logger_, "team_min [CLOSEST] %.2f m",
+      decision.engagement_min_distance);
   }
   if (decision.hit) {
     RCLCPP_ERROR(
@@ -291,7 +310,8 @@ void PlanningModule::handleDecision(
       const bool preserve_global_replan = decision.global_replan_required ||
         (pending_request_ && pending_request_->global_replan_required);
       pending_request_ = PlanningWork{
-        *decision.plan_request, preserve_global_replan};
+        decision.phase, decision.ttc_sec, *decision.plan_request,
+        preserve_global_replan};
     }
     request_cv_.notify_one();
   }
@@ -333,113 +353,6 @@ void PlanningModule::workerLoop()
   }
 }
 
-// 알고리즘 분기는 이 함수 안에만 있다. A*든 DVO든 결과는 PlanResult 하나로
-// 나오므로 호출부(execute/publishPlan)는 무슨 플래너였는지 몰라도 된다.
-PlanResult PlanningModule::runPlanner(const PlanningWork & work)
-{
-  const PlanRequest & request = work.request;
-  PlanResult result;
-  // 예측 통로는 A*가 쓰는 정적 장애물이다. DVO 단독 모드는 어뢰를 움직이는
-  // 물체로 직접 다루므로 통로를 만들지 않는다.
-  if (request.planner != PlannerType::kDynamicVO) {
-    result.obstacles = buildTorpedoObstacles(request, core_config_);
-  }
-  const auto & obstacles = result.obstacles;
-
-  // 어뢰 현재 위치 박스가 start/goal을 덮으면 A*는 성공할 수 없다.
-  // 일반 예외 대신 원인을 명시하고, 어뢰가 지나간 뒤의 재시도(경로가
-  // 없으므로 needsReplan이 계속 true)에 맡긴다.
-  if (!obstacles.empty()) {
-    const auto & live_barrier = obstacles.front();
-    if (boxContains(
-        live_barrier, request.goal, core_config_.astar.safety_margin))
-    {
-      result.failure = PlanFailure::kGoalInsideBarrier;
-      return result;
-    }
-    if (boxContains(
-        live_barrier, request.start, core_config_.astar.safety_margin))
-    {
-      result.failure = PlanFailure::kStartInsideBarrier;
-      return result;
-    }
-  }
-
-  const GridMapConfig map = planningMap(request, obstacles, core_config_);
-
-  // DVO 단독: A*를 전혀 쓰지 않고 미션 목표를 향해 직접 롤아웃한다.
-  if (request.planner == PlannerType::kDynamicVO) {
-    DynamicVOOptions options = config_.dynamic_vo;
-    options.standalone = true;
-    std::vector<MovingObstacle> moving_obstacles;
-    if (request.torpedo_valid) {
-      BoxObstacle live_torpedo = core_config_.torpedo_barrier;
-      live_torpedo.center = request.torpedo;
-      moving_obstacles.push_back({live_torpedo, request.torpedo_velocity});
-    }
-    const DynamicVOResult vo = runDynamicVO3D(
-      request.start, request.robot_velocity, request.goal, map,
-      moving_obstacles, options);
-    if (!vo.success || vo.local_path.size() < kMinimumDynamicVOWaypoints) {
-      // 경로가 너무 짧으면 PathFollower가 "끝에 도달"로 보고 미션 목표로
-      // 직행해 회피를 무시한다. 그런 경로는 아예 내보내지 않고 정지시킨다.
-      result.failure = PlanFailure::kNoSafeLocalPath;
-      result.stop_requested = true;
-      return result;
-    }
-    result.path = vo.local_path;
-    result.vo_active = vo.avoidance_required;
-    result.valid = true;
-    return result;
-  }
-
-  // A* 단독 / 하이브리드: 전역 경로를 먼저 확보한다.
-  if (work.global_replan_required || global_path_.empty()) {
-    auto new_global_path = runEnhancedAStar3D(
-      request.start, request.goal, map, obstacles, core_config_.astar);
-    if (new_global_path.empty()) {
-      result.failure = PlanFailure::kNoAStarPath;
-      return result;
-    }
-    global_path_ = std::move(new_global_path);
-    {
-      std::lock_guard<std::mutex> lock(request_mutex_);
-      // Dynamic VO: replan policy evaluates the stable A* path, not local detours.
-      last_path_ = global_path_;
-    }
-  }
-
-  result.path = global_path_;
-  result.valid = !result.path.empty();
-  if (request.planner == PlannerType::kAStar) {
-    return result;  // A* 단독은 국소 회피를 하지 않는다.
-  }
-
-  // 하이브리드: A* 경로를 따라가다 위험하면 DVO가 국소로 비켜갔다 복귀한다.
-  if (request.torpedo_valid && !global_path_.empty()) {
-    const LocalTarget target = selectLocalTarget(
-      request.start, global_path_, config_.dynamic_vo.path_lookahead);
-    BoxObstacle live_torpedo = core_config_.torpedo_barrier;
-    live_torpedo.center = request.torpedo;
-    // Dynamic VO: use one real moving obstacle, not A* prediction boxes.
-    const std::vector<MovingObstacle> moving_obstacles{{
-      live_torpedo, request.torpedo_velocity}};
-    const DynamicVOResult vo = runDynamicVO3D(
-      request.start, request.robot_velocity, target.point, map,
-      moving_obstacles, config_.dynamic_vo);
-    result.vo_active = vo.avoidance_required;
-    if (vo.avoidance_required) {
-      if (!vo.success || vo.local_path.empty()) {
-        result.failure = PlanFailure::kNoSafeLocalPath;
-        result.valid = false;
-        result.stop_requested = true;  // 병합 전 하이브리드와 같은 동작이다.
-        return result;
-      }
-      result.path = mergePaths(vo.local_path, global_path_, target.index);
-    }
-  }
-  return result;
-}
 
 // 계획 결과를 ROS로 내보낸다. 여기서부터 DataHub -> PathFollower -> PPID로
 // 이어지며, 이 함수는 어떤 알고리즘이 경로를 만들었는지 알지 못한다.
@@ -495,6 +408,15 @@ void PlanningModule::reportPlanFailure(
     case PlanFailure::kNoSafeLocalPath:
       RCLCPP_WARN(logger_, "team_min Dynamic VO found no safe local path");
       break;
+    case PlanFailure::kSpaceTimeUnreachable:
+      RCLCPP_WARN_THROTTLE(
+        logger_, *clock_, 5000,
+        "team_min space-time lookahead is outside the time window; "
+        "using the global path (lower planning.spacetime.lookahead)");
+      break;
+    case PlanFailure::kNoSpaceTimePath:
+      RCLCPP_WARN(logger_, "team_min space-time A* found no path");
+      break;
     case PlanFailure::kNone:
       break;
   }
@@ -505,7 +427,16 @@ void PlanningModule::execute(const PlanningWork & work)
   const PlanRequest & request = work.request;
   const auto calculation_start = std::chrono::steady_clock::now();
   try {
-    const PlanResult result = runPlanner(work);
+    PlanningEngineOutput engine_output;
+    {
+      std::lock_guard<std::mutex> engine_lock(engine_mutex_);
+      engine_output = engine_->plan(work);
+    }
+    if (engine_output.replan_reference_path) {
+      std::lock_guard<std::mutex> request_lock(request_mutex_);
+      last_path_ = *engine_output.replan_reference_path;
+    }
+    const PlanResult & result = engine_output.result;
     if (!result.valid) {
       // 판단은 runPlanner가 했고, 로그는 여기서 낸다(순수 계층 유지).
       // 문자열과 throttle 동작은 분리 전과 동일하다.
@@ -527,9 +458,11 @@ void PlanningModule::execute(const PlanningWork & work)
       std::chrono::steady_clock::now() - calculation_start).count();
     RCLCPP_INFO(
       logger_,
-      "team_min %s time=%.3f ms, waypoints=%zu, boxes=%zu, Dynamic VO=%s",
+      "team_min %s time=%.3f ms, waypoints=%zu, boxes=%zu, Dynamic VO=%s, "
+      "nodes=%zu",
       plannerName(request.planner), calculation_ms, result.path.size(),
-      result.obstacles.size(), result.vo_active ? "active" : "clear");
+      result.obstacles.size(), result.vo_active ? "active" : "clear",
+      result.expanded_nodes);
   } catch (const std::exception & error) {
     const double calculation_ms = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - calculation_start).count();
