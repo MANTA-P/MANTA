@@ -1,6 +1,7 @@
 # MANTA 프로젝트
 
-BlueROV 회피 제어와 위협 어뢰 제어를 DAVE 시뮬레이션에서 시험하는 ROS 2 Jazzy 프로젝트입니다. Gazebo GUI와 조이스틱은 사용하지 않으며, RViz에서 상태를 확인합니다.
+**MANTA**는 **Maneuvering Autonomous Navigation for Torpedo Avoidance**의 약어로, **어뢰 회피를 위한 자율 기동 항법**을 의미하며, BlueROV 회피 제어와 위협 어뢰 제어를 DAVE 시뮬레이션에서 시험하는 ROS 2 Jazzy 프로젝트입니다. Gazebo GUI와 조이스틱 없이 RViz에서 상태를 확인합니다.
+
 
 ## 처음 설치하기
 
