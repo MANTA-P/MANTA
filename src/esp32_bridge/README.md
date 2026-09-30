@@ -1,59 +1,57 @@
-# ESP32 UART → CAN bridge
+# ESP32 Torpedo HIL UART bridge
 
-노트북이 UART로 보낸 문자 1개를 ESP32가 받아 CAN 표준 데이터 프레임으로 송신하는 ESP-IDF C 펌웨어입니다.
+ROS 2의 BlueROV/어뢰 odometry와 제어 명령을 ESP32 A에 보내고, ESP32 B에서
+돌아온 어뢰 actuator와 controller status를 받는 PC 측 양방향 bridge다.
 
-## 데이터 규격
-
-| 항목 | 기본값 |
-| --- | --- |
-| USB | ESP32-S3 USB Serial/JTAG (`/dev/ttyACM0`) |
-| 입력 | USB CDC-ACM으로 수신한 1 byte |
-| CAN bitrate | 500 kbit/s |
-| CAN TX/RX | GPIO17 / GPIO18 |
-| CAN ID | `0x200` (표준 11-bit) |
-| DLC | `1` |
-| CAN payload | `payload[0] = UART로 받은 문자 1 byte` |
-
-예를 들어 노트북이 `A`를 보내면 ASCII 값 `0x41`이 CAN ID `0x200`, DLC `1`의 `payload[0]`으로 송신됩니다. 줄바꿈 문자도 별도 필터 없이 그대로 송신합니다.
-
-핀과 bitrate, CAN ID는 [`main/board_config.h`](main/board_config.h)에서 변경합니다.
-
-## 배선
-
-### 노트북 USB
-
-- 노트북과 ESP32-S3의 USB 포트를 USB 데이터 케이블로 연결한다.
-- 노트북의 `/dev/ttyACM0`를 ROS 송신 프로그램의 device로 사용한다.
-- 이 구성에서는 GPIO15/GPIO16이나 별도 USB-UART 어댑터를 사용하지 않는다.
-
-### CAN
-
-- ESP32 GPIO17 → CAN transceiver TXD
-- ESP32 GPIO18 ← CAN transceiver RXD
-- transceiver CANH/CANL을 수신 보드와 연결하고 공통 GND를 연결한다.
-- CAN 버스 양 끝에 120 Ω 종단저항이 필요하다.
-
-ESP32의 TWAI 신호는 CANH/CANL에 직접 연결할 수 없다. SN65HVD230 같은 CAN transceiver를 반드시 사용한다.
-
-## 빌드와 플래시
-
-ESP-IDF 6.0.2와 `esp32s3` 타깃을 기준으로 한다. 새 터미널마다 먼저 ESP-IDF 환경을 활성화해야 한다.
-
-```bash
-source /home/user/.espressif/v6.0.2/esp-idf/export.sh
-cd ~/manta_ws/src/esp32_bridge
-idf.py set-target esp32s3
-idf.py build
+```text
+ROS 2 odometry/control -> /dev/ttyACM0 -> ESP32 A
+ROS 2 actuator topics  <- /dev/ttyACM0 <- ESP32 A
 ```
 
-빌드가 성공하면 `build/esp32_bridge.bin`이 생성된다. ESP32의 flash/console 포트를 확인한 뒤 다음처럼 플래시하고 로그를 연다.
+공식 wire format은 `AA 55 | MESSAGE_ID | LENGTH | PAYLOAD`다. CRC, UART
+sequence와 timestamp는 사용하지 않으며 multi-byte 값은 fixed-point
+big-endian이다. 세부 ID와 payload는
+[`src/TORPEDO_HIL_AI_IMPLEMENTATION_SPEC.md`](src/TORPEDO_HIL_AI_IMPLEMENTATION_SPEC.md)를
+따른다.
+
+## 빌드와 실행
 
 ```bash
-idf.py -p /dev/ttyACM0 flash monitor
+source /opt/ros/jazzy/setup.bash
+cd /home/user/manta_ws
+colcon build --packages-select esp32_bridge --symlink-install
+source install/setup.bash
+ros2 run esp32_bridge esp32_ros_uart_tx_node
 ```
 
-`/dev/ttyACM0`은 ESP32-S3 USB Serial/JTAG 포트다. 플래시 후에는 ROS 송신 프로그램이 이 포트를 열어 USB로 문자를 보낸다. `idf.py monitor`와 ROS 송신 프로그램을 동시에 실행하면 같은 포트를 서로 점유하므로 함께 사용하지 않는다. `build/`, `sdkconfig` 같은 빌드 생성물은 Git에서 제외된다.
+기본 serial 장치는 `/dev/ttyACM0`, host baud parameter는 `921600`이다.
 
-## 수신 보드 확인
+```bash
+ros2 run esp32_bridge esp32_ros_uart_tx_node --ros-args \
+  -p device:=/dev/ttyACM1 \
+  -p control.armed:=true \
+  -p control.mode:=1 \
+  -p control.target_thrust:=500
+```
 
-다른 CAN 보드는 bitrate를 500 kbit/s로 맞추고 `0x200` 프레임을 수신한다. 수신한 DLC가 1인지 확인한 뒤 `payload[0]`을 `char`로 출력하면 된다. CAN 송신에는 다른 활성 CAN 노드의 ACK가 필요하므로 수신 보드 또는 CAN 분석기를 연결한 상태에서 시험한다.
+Control command는 20 Hz로 반복된다.
+
+- `control.armed`: `false`/`true`
+- `control.mode`: `0=None`, `1=Simple`, `2=PNG`
+- `control.target_thrust`: `0..1000`
+
+구독 토픽:
+
+- `topics.bluerov_odometry` (기본 `/model/bluerov2/odometry`)
+- `topics.torpedo_odometry` (기본 `/torpedo/state/odometry`)
+
+출력 토픽:
+
+- `/torpedo/actuators/thruster/command`
+- `/torpedo/actuators/fins/top/command`
+- `/torpedo/actuators/fins/bottom/command`
+- `/torpedo/actuators/fins/left/command`
+- `/torpedo/actuators/fins/right/command`
+
+유효한 actuator UART frame이 200 ms 동안 들어오지 않으면 다섯 출력 모두에
+안전값 `0.0`을 publish한다.

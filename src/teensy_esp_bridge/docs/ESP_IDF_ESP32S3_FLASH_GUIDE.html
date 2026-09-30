@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>ESP-IDF로 ESP32-S3 프로젝트 만들기와 플래시</title>
+<style>
+  @page { size: A4; margin: 15mm; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; color: #172033; background: white;
+    font-family: "Noto Sans CJK KR", "Noto Sans KR", sans-serif;
+    font-size: 9.6pt; line-height: 1.47;
+  }
+  h1, h2, h3 { color: #12315c; page-break-after: avoid; }
+  h1 { font-size: 24pt; line-height: 1.25; margin: 0 0 7mm; }
+  h2 { font-size: 16pt; border-bottom: 1.3px solid #8ca9cc; padding-bottom: 2mm; margin: 7mm 0 3mm; }
+  h3 { font-size: 11.5pt; margin: 4mm 0 2mm; }
+  p { margin: 2mm 0; }
+  ul, ol { margin: 2mm 0 3mm 6mm; padding-left: 5mm; }
+  li { margin: 1mm 0; }
+  code, pre { font-family: "Noto Sans Mono CJK KR", "Noto Sans Mono CJK JP", monospace; }
+  code { color: #8a2d3b; font-size: 9.2pt; }
+  pre {
+    white-space: pre-wrap; word-wrap: break-word; background: #f2f5f9;
+    border-left: 3px solid #3274b9; padding: 3mm 4mm; margin: 3mm 0;
+    font-size: 8.4pt; line-height: 1.42; page-break-inside: avoid;
+  }
+  table { width: 100%; border-collapse: collapse; margin: 3mm 0 5mm; page-break-inside: avoid; }
+  th, td { border: 1px solid #aebacc; padding: 2mm 2.5mm; vertical-align: top; }
+  th { background: #e8eff7; color: #16385f; }
+  .cover { padding-top: 42mm; }
+  .cover .subtitle { color: #45627f; font-size: 14pt; margin-bottom: 20mm; }
+  .cover .meta { margin-top: 15mm; padding: 5mm; background: #eef4fa; border-radius: 3mm; }
+  .page-break { page-break-before: always; }
+  .note, .warning, .success { padding: 3mm 4mm; margin: 3mm 0; page-break-inside: avoid; }
+  .note { background: #edf5ff; border-left: 4px solid #3478bd; }
+  .warning { background: #fff3dc; border-left: 4px solid #d68a12; }
+  .success { background: #eaf8ef; border-left: 4px solid #2a9658; }
+  .small { font-size: 8.8pt; color: #516174; }
+  .step { display: inline-block; color: white; background: #2769aa; padding: 0.5mm 2.5mm; border-radius: 3mm; }
+  .checklist { list-style: none; padding-left: 0; margin-left: 0; }
+  .checklist li:before { content: "□ "; color: #2769aa; font-weight: bold; }
+  .toc td:first-child { width: 13mm; text-align: center; font-weight: bold; color: #2769aa; }
+</style>
+</head>
+<body>
+
+<section class="cover">
+  <h1>ESP-IDF로 ESP32-S3<br>프로젝트 만들기와 플래시</h1>
+  <div class="subtitle">Linux 터미널 기준 실습 가이드</div>
+  <p>빈 프로젝트 생성부터 ESP32-S3 타깃 설정, 빌드, USB 포트 확인,
+     펌웨어 기록과 시리얼 모니터 사용까지 한 번에 진행한다.</p>
+  <div class="meta">
+    <b>검증 환경</b><br>
+    ESP-IDF v6.0.2<br>
+    프로젝트: <code>teensy_esp_bridge</code><br>
+    대상 칩: ESP32-S3<br>
+    작성일: 2026-09-09
+  </div>
+</section>
+
+<section class="page-break">
+  <h2>목차와 전체 흐름</h2>
+  <table class="toc">
+    <tr><td>1</td><td>준비물과 ESP-IDF 환경 활성화</td></tr>
+    <tr><td>2</td><td>새 프로젝트 생성 및 최소 코드 작성</td></tr>
+    <tr><td>3</td><td>ESP32-S3 타깃과 프로젝트 옵션 설정</td></tr>
+    <tr><td>4</td><td>빌드와 USB 시리얼 포트 확인</td></tr>
+    <tr><td>5</td><td>보드에 플래시하고 로그 확인</td></tr>
+    <tr><td>6</td><td>현재 CAN 프로젝트를 빌드·플래시하는 방법</td></tr>
+    <tr><td>7</td><td>오류 해결 및 최종 체크리스트</td></tr>
+  </table>
+
+  <h3>작업 순서</h3>
+  <pre>ESP-IDF 활성화
+    ↓
+프로젝트 생성 → 코드 작성 → set-target esp32s3
+    ↓
+menuconfig → build → USB 포트 확인
+    ↓
+flash → monitor → 동작 확인</pre>
+
+  <div class="note"><b>명령 실행 위치</b><br>
+  별도 설명이 없다면 모든 <code>idf.py</code> 명령은 최상위
+  <code>CMakeLists.txt</code>가 있는 프로젝트 루트에서 실행한다.</div>
+
+  <h2>1. 준비물</h2>
+  <ul>
+    <li>ESP32-S3 개발 보드</li>
+    <li>데이터 통신이 가능한 USB 케이블</li>
+    <li>Linux PC와 설치 완료된 ESP-IDF</li>
+    <li>터미널 및 텍스트 편집기</li>
+  </ul>
+  <div class="warning"><b>USB 케이블 주의</b><br>
+  충전 전용 케이블은 전원만 공급하고 시리얼 장치를 만들지 않는다. 포트가
+  나타나지 않으면 먼저 다른 데이터 케이블과 USB 포트를 시험한다.</div>
+</section>
+
+<section class="page-break">
+  <h2>2. ESP-IDF 환경 활성화</h2>
+  <p>이 개발 환경에 설치된 ESP-IDF v6.0.2는 다음 명령으로 활성화한다.</p>
+  <pre>source /home/user/.espressif/v6.0.2/esp-idf/export.sh
+idf.py --version</pre>
+  <p>정상이라면 다음과 비슷하게 출력된다.</p>
+  <pre>ESP-IDF v6.0.2</pre>
+  <div class="note">새 터미널을 열 때마다 <code>export.sh</code>를 다시 실행해야
+  한다. <code>idf.py: command not found</code>가 보이면 가장 먼저 환경 활성화
+  여부를 확인한다.</div>
+
+  <h2>3. 새 프로젝트 생성</h2>
+  <p>작업용 디렉터리로 이동한 다음 <code>idf.py create-project</code>를 실행한다.</p>
+  <pre>mkdir -p ~/esp-projects
+cd ~/esp-projects
+idf.py create-project esp32s3_demo
+cd esp32s3_demo</pre>
+
+  <p>최소 프로젝트는 대략 다음 구조를 갖는다.</p>
+  <pre>esp32s3_demo/
+├── CMakeLists.txt
+└── main/
+    ├── CMakeLists.txt
+    └── esp32s3_demo.c</pre>
+
+  <h3>최상위 CMakeLists.txt</h3>
+  <pre>cmake_minimum_required(VERSION 3.16)
+
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+project(esp32s3_demo)</pre>
+
+  <h3>main/CMakeLists.txt</h3>
+  <pre>idf_component_register(
+    SRCS "esp32s3_demo.c"
+    INCLUDE_DIRS "."
+)</pre>
+</section>
+
+<section class="page-break">
+  <h2>4. 최소 동작 코드 작성</h2>
+  <p><code>main/esp32s3_demo.c</code>를 아래 내용으로 작성한다. 1초마다 카운터를
+  출력하므로 별도 LED 핀 정보 없이 플래시와 실행 여부를 확인할 수 있다.</p>
+  <pre>#include &lt;inttypes.h&gt;
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+static const char *TAG = "esp32s3_demo";
+
+void app_main(void)
+{
+    uint32_t count = 0;
+
+    while (true) {
+        ESP_LOGI(TAG, "Hello ESP32-S3, count=%" PRIu32, count++);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}</pre>
+
+  <h2>5. ESP32-S3 타깃 설정</h2>
+  <pre>idf.py set-target esp32s3</pre>
+  <p>이 명령은 프로젝트의 대상을 ESP32-S3로 지정한다. 기존에 다른 타깃으로
+  생성한 <code>sdkconfig</code>와 빌드 캐시가 있으면 새 타깃에 맞게 재구성된다.</p>
+
+  <h3>설정 화면 열기</h3>
+  <pre>idf.py menuconfig</pre>
+  <p>보드별 Flash 크기, Flash 모드, 콘솔 출력 방식 등 기본값을 확인한 뒤
+  <b>Save</b>하고 종료한다. 일반 개발 보드에서는 우선 기본값으로 빌드하고,
+  보드 제조사의 핀맵·Flash 사양과 다를 때만 변경하는 편이 안전하다.</p>
+
+  <div class="warning"><b>보드 이름과 칩 이름은 다를 수 있다.</b><br>
+  제품명에 N16R8 같은 표기가 있더라도 GPIO 배치와 USB 회로는 제조사마다
+  다르다. 정확한 보드 회로도와 제조사 안내를 함께 확인한다.</div>
+</section>
+
+<section class="page-break">
+  <h2>6. 프로젝트 빌드</h2>
+  <pre>idf.py build</pre>
+  <p>빌드가 성공하면 마지막 부분에 Flash 명령 안내와 바이너리 크기가 출력되고,
+  프로젝트 아래 <code>build/</code> 디렉터리에 결과물이 생성된다.</p>
+
+  <h3>자주 사용하는 빌드 명령</h3>
+  <table>
+    <tr><th>명령</th><th>용도</th></tr>
+    <tr><td><code>idf.py build</code></td><td>변경된 부분을 포함해 프로젝트 빌드</td></tr>
+    <tr><td><code>idf.py clean</code></td><td>일반 빌드 산출물 정리</td></tr>
+    <tr><td><code>idf.py fullclean</code></td><td>빌드 캐시까지 완전히 정리</td></tr>
+    <tr><td><code>idf.py reconfigure</code></td><td>CMake 설정을 다시 생성</td></tr>
+  </table>
+  <div class="warning"><code>fullclean</code>은 빌드 디렉터리 내용을 제거하므로
+  문제 해결이나 타깃 변경처럼 필요한 경우에만 사용한다.</div>
+
+  <h2>7. USB 시리얼 포트 확인</h2>
+  <p>보드를 연결하기 전과 후에 다음 명령의 결과를 비교한다.</p>
+  <pre>ls /dev/ttyACM* /dev/ttyUSB* 2&gt;/dev/null</pre>
+  <p>일반적으로 네이티브 USB Serial/JTAG 연결은 <code>/dev/ttyACM0</code>,
+  USB-UART 브리지는 <code>/dev/ttyUSB0</code> 형태로 나타난다. 번호는 환경에
+  따라 달라질 수 있다.</p>
+
+  <h3>권한 오류가 발생하는 경우</h3>
+  <pre>groups
+ls -l /dev/ttyACM0</pre>
+  <p>배포판에 따라 사용자를 <code>dialout</code> 또는 <code>uucp</code> 그룹에
+  추가해야 할 수 있다. 그룹 변경 후에는 로그아웃과 로그인이 필요하다.</p>
+</section>
+
+<section class="page-break">
+  <h2>8. 보드에 펌웨어 플래시</h2>
+  <p>확인한 포트를 <code>-p</code> 옵션으로 지정한다.</p>
+  <pre>idf.py -p /dev/ttyACM0 flash</pre>
+  <p>USB-UART 장치라면 예를 들어 다음과 같이 실행한다.</p>
+  <pre>idf.py -p /dev/ttyUSB0 flash</pre>
+
+  <h3>자동 다운로드 모드 진입이 안 되는 경우</h3>
+  <ol>
+    <li>보드의 <b>BOOT</b> 버튼을 누른 상태로 유지한다.</li>
+    <li><b>RESET/EN</b> 버튼을 짧게 눌렀다 놓는다.</li>
+    <li><b>BOOT</b> 버튼을 놓는다.</li>
+    <li>다시 <code>idf.py -p 포트 flash</code>를 실행한다.</li>
+  </ol>
+  <p class="small">버튼 명칭과 다운로드 모드 진입 절차는 보드에 따라 다를 수 있다.</p>
+
+  <h2>9. 로그 모니터링</h2>
+  <pre>idf.py -p /dev/ttyACM0 monitor</pre>
+  <p>빌드, 플래시, 모니터를 한 번에 실행할 수도 있다.</p>
+  <pre>idf.py -p /dev/ttyACM0 flash monitor</pre>
+  <div class="success"><b>정상 동작 예</b><br>
+  <code>I (...) esp32s3_demo: Hello ESP32-S3, count=0</code><br>
+  이후 카운터가 1초마다 증가하면 프로젝트 생성과 플래시가 완료된 것이다.</div>
+  <p>모니터 종료 단축키는 <b>Ctrl+]</b>이다.</p>
+</section>
+
+<section class="page-break">
+  <h2>10. 현재 CAN 프로젝트 빌드 및 플래시</h2>
+  <p>이 저장소는 ESP32-S3가 TWAI(Classical CAN) 프레임을 보내는 프로젝트다.
+  프로젝트 루트에서 다음 순서로 실행한다.</p>
+  <pre>cd /home/user/manta_ws/src/teensy_esp_bridge
+source /home/user/.espressif/v6.0.2/esp-idf/export.sh
+
+idf.py set-target esp32s3
+idf.py menuconfig
+idf.py build
+idf.py -p /dev/ttyACM0 flash monitor</pre>
+
+  <h3>이 프로젝트의 기본 CAN 설정</h3>
+  <table>
+    <tr><th>항목</th><th>기본값</th><th>연결/설명</th></tr>
+    <tr><td>TWAI TX</td><td>GPIO 5</td><td>외부 CAN 트랜시버의 TXD/D 입력</td></tr>
+    <tr><td>TWAI RX</td><td>GPIO 4</td><td>외부 CAN 트랜시버의 RXD/R 출력</td></tr>
+    <tr><td>Bitrate</td><td>500 kbit/s</td><td>버스의 모든 노드가 동일해야 함</td></tr>
+    <tr><td>CAN ID</td><td><code>0x123</code></td><td>11-bit Standard ID</td></tr>
+    <tr><td>송신 주기</td><td>100 ms</td><td>8-byte 프레임 주기 송신</td></tr>
+  </table>
+  <p><code>menuconfig → Teensy CAN bridge configuration</code>에서 GPIO, bitrate,
+  CAN ID와 송신 주기를 변경할 수 있다.</p>
+
+  <div class="warning"><b>CANH/CANL에 GPIO를 직접 연결하면 안 된다.</b><br>
+  ESP32-S3의 TWAI는 CAN 컨트롤러이므로 SN65HVD230 같은 3.3 V 로직 호환 외부
+  CAN 트랜시버가 필요하다. TX GPIO는 트랜시버 TXD로, RX GPIO는 RXD로
+  연결하고 CAN 버스의 CANH, CANL 및 GND를 각 노드와 연결한다.</div>
+</section>
+
+<section class="page-break">
+  <h2>11. 문제 해결</h2>
+  <table>
+    <tr><th>증상</th><th>확인할 내용</th></tr>
+    <tr><td><code>idf.py: command not found</code></td><td><code>export.sh</code>를 실행해 ESP-IDF 환경을 활성화한다.</td></tr>
+    <tr><td>시리얼 포트가 없음</td><td>데이터 케이블, 다른 USB 포트, BOOT 모드, <code>dmesg</code>를 확인한다.</td></tr>
+    <tr><td><code>Permission denied</code></td><td>장치 소유 그룹과 사용자 그룹을 확인한다.</td></tr>
+    <tr><td><code>Failed to connect</code></td><td>다른 모니터 프로그램을 닫고 BOOT/RESET으로 다운로드 모드에 진입한다.</td></tr>
+    <tr><td>타깃 불일치 오류</td><td><code>idf.py set-target esp32s3</code> 후 다시 빌드한다.</td></tr>
+    <tr><td>설정/캐시 오류</td><td>필요한 경우 <code>idf.py fullclean</code>, <code>idf.py reconfigure</code>를 실행한다.</td></tr>
+    <tr><td>CAN <code>bus-off</code></td><td>수신 노드 ACK, bitrate, CANH/L, 공통 GND, 120 Ω 종단을 확인한다.</td></tr>
+  </table>
+
+  <h3>CAN 버스 점검</h3>
+  <ul>
+    <li>전원을 끈 상태에서 CANH-CANL 저항이 약 60 Ω인지 확인한다.</li>
+    <li>120 Ω 종단저항은 버스의 물리적인 양 끝에만 설치한다.</li>
+    <li>ESP32-S3 보드의 GPIO 4/5가 다른 기능과 충돌하지 않는지 회로도를 확인한다.</li>
+    <li>CAN 송신은 다른 활성 노드가 ACK해야 정상 완료된다.</li>
+  </ul>
+
+  <h2>12. 최종 체크리스트</h2>
+  <ul class="checklist">
+    <li><code>idf.py --version</code>이 정상 출력된다.</li>
+    <li>프로젝트 루트에 최상위 <code>CMakeLists.txt</code>가 있다.</li>
+    <li><code>idf.py set-target esp32s3</code>를 실행했다.</li>
+    <li><code>idf.py build</code>가 오류 없이 완료됐다.</li>
+    <li>보드의 실제 시리얼 포트를 확인했다.</li>
+    <li><code>flash</code> 완료 후 자동 리셋되었다.</li>
+    <li><code>monitor</code>에서 애플리케이션 로그가 반복 출력된다.</li>
+    <li>CAN 사용 시 트랜시버, 공통 GND, bitrate와 종단저항을 확인했다.</li>
+  </ul>
+
+  <div class="success"><b>가장 짧은 실행 요약</b>
+  <pre>source /home/user/.espressif/v6.0.2/esp-idf/export.sh
+cd /home/user/manta_ws/src/teensy_esp_bridge
+idf.py set-target esp32s3
+idf.py build
+idf.py -p /dev/ttyACM0 flash monitor</pre>
+  포트 이름은 실제 환경에 맞게 바꾼다.</div>
+</section>
+
+</body>
+</html>

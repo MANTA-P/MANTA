@@ -77,3 +77,10 @@ TX GPIO 5, RX GPIO 4다.
 - Teensy에서 아무것도 수신하지 못함: CAN1 핀 22/23과 트랜시버 방향, standby/enable 핀을 확인한다.
 
 상세 구현 계획은 `CAN_COMMUNICATION_PLAN.md`를 참고한다.
+
+## 오실로스코프용 고정 프레임 송신기
+
+단일 채널 오실로스코프로 CAN_H와 CAN_L을 순차 측정할 수 있도록 같은 ID와
+payload를 20 ms마다 반복 송신하는 Teensy 4.1 스케치는
+[`teensy_can_scope/`](teensy_can_scope/)에 있다. Teensy의 CAN2를 ACK 노드로
+사용하는 배선, 종단저항, 플래시 및 측정 절차도 해당 README에 정리되어 있다.

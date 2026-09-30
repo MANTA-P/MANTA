@@ -5,453 +5,104 @@
 #include "config.h"
 
 FlexCAN_T4<CAN1, RX_SIZE_16, TX_SIZE_16> dumpCan;
-FlexCAN_T4<CAN2, RX_SIZE_16, TX_SIZE_16> estopCan;
-
-constexpr FLEXCAN_MAILBOX kDumpMailboxA = MB8;
-constexpr FLEXCAN_MAILBOX kDumpMailboxB = MB9;
-constexpr FLEXCAN_MAILBOX kEstopMailbox = MB8;
+constexpr FLEXCAN_MAILBOX kDumpMailbox[2] = {MB8, MB9};
 
 struct Statistics {
-  uint32_t dumpGenerated = 0;
-  uint32_t dumpEnqueued = 0;
-  uint32_t dumpDropped = 0;
-  uint32_t dumpMailboxBusy = 0;
-  uint32_t estopDebouncedEvents = 0;
-  uint32_t estopTxRequests = 0;
-  uint32_t estopTxFailOrRetry = 0;
-  uint32_t estopQueueOverflow = 0;
-  uint32_t canErrorCount = 0;
-  uint32_t busOffCount = 0;
-};
+  uint32_t generated = 0;
+  uint32_t enqueued = 0;
+  uint32_t dropped = 0;
+  uint32_t mailboxBusy = 0;
+  uint32_t txTimeout = 0;
+  uint32_t txUnconfirmed = 0;
+  uint32_t recoveries = 0;
+  uint32_t canErrors = 0;
+  uint32_t busOff = 0;
+  uint32_t debouncedEdges = 0;
+} stats;
 
-struct EstopEvent {
-  bool active = false;
-  uint16_t sequence = 0;
-  uint32_t rawUs = 0;
-  uint32_t debouncedUs = 0;
-  uint32_t requestUs = 0;
-  uint32_t firstTxUs = 0;
-  uint32_t nextSendUs = 0;
-  uint8_t remaining = 0;
-  bool inFlight = false;
-  bool hasRequestTimestamp = false;
-  bool hasFirstTxTimestamp = false;
-};
+volatile uint8_t rawLevel = HIGH;
+volatile uint32_t rawEdgeUs = 0;
+volatile uint32_t rawEdges = 0;
+volatile bool rawChanged = false;
+uint8_t candidateLevel = HIGH;
+uint8_t debouncedLevel = HIGH;
+uint32_t candidateSinceUs = 0;
+bool debouncePending = true;
+bool switchInitialized = false;
 
-struct LastEstopTiming {
-  bool valid = false;
-  bool active = false;
-  uint16_t sequence = 0;
-  uint32_t rawToDebouncedUs = 0;
-  uint32_t requestToTxUs = 0;
-};
+volatile bool loadOn = false;
+volatile uint32_t loadCycle = 0;
+volatile uint32_t lastOnUs = 0;
+uint32_t lastOffUs = 0;
+uint32_t nextGenerationUs = 0;
+uint32_t sequence = 0;
+CAN_message_t latestFrame;
+bool latestPending = false;
 
-Statistics stats;
-EstopEvent estopQueue[kEstopQueueCapacity];
-uint8_t estopQueueHead = 0;
-uint8_t estopQueueTail = 0;
-uint8_t estopQueueCount = 0;
-LastEstopTiming lastEstopTiming;
+volatile bool inFlight[2] = {false, false};
+volatile uint32_t mailboxCycle[2] = {0, 0};
+volatile uint32_t requestUs[2] = {0, 0};
+volatile uint32_t txSuccess = 0;
+volatile uint32_t lastCompleteUs = 0;
+volatile bool firstPending = false;
+volatile bool firstReady = false;
+volatile uint32_t firstCycle = 0;
+volatile uint32_t firstLatencyUs = 0;
 
-volatile uint8_t switchRawLevel = HIGH;
-volatile uint32_t switchRawEdgeUs = 0;
-volatile uint32_t estopRawEdges = 0;
-volatile bool switchRawChanged = false;
-
-volatile uint32_t dumpTxSuccess = 0;
-volatile uint8_t dumpTxCompletedMask = 0;
-
-volatile uint32_t estopTxSuccess = 0;
-volatile bool estopTxCompleted = false;
-volatile uint16_t estopCompletedSequence = 0;
-volatile uint32_t estopCompletedUs = 0;
-
-uint8_t switchCandidateLevel = HIGH;
-uint8_t switchDebouncedLevel = HIGH;
-uint32_t switchCandidateSinceUs = 0;
-uint16_t nextEstopSequence = 0;
-
-uint32_t dumpSequence = 0;
-uint32_t nextDumpGenerationUs = 0;
-CAN_message_t latestDumpFrame;
-bool latestDumpPending = false;
-bool dumpMailboxAInFlight = false;
-bool dumpMailboxBInFlight = false;
+volatile bool drainActive = false;
+volatile uint32_t drainCycle = 0;
+volatile uint32_t drainOffUs = 0;
+volatile uint32_t drainLastUs = 0;
+volatile uint8_t drainInitial = 0;
+volatile uint8_t drainRemaining = 0;
+volatile uint8_t drainCompleted = 0;
+volatile uint8_t drainUnconfirmed = 0;
 
 uint32_t nextStatsUs = 0;
-bool dumpBusOff = false;
-bool estopBusOff = false;
+bool wasBusOff = false;
+bool recoveryPending = false;
+uint32_t nextRecoveryUs = 0;
 
-static uint32_t estopId()
-{
-  return kPriorityInverted ? kNormalDumpId : kNormalEstopId;
-}
-
-static uint32_t dumpId()
-{
-  return kPriorityInverted ? kNormalEstopId : kNormalDumpId;
-}
-
-static bool timeReached(uint32_t now, uint32_t deadline)
+static bool reached(uint32_t now, uint32_t deadline)
 {
   return static_cast<int32_t>(now - deadline) >= 0;
 }
 
-static bool switchIsActive(uint8_t level)
+static void writeBe32(uint8_t *out, uint32_t value)
 {
-  return level == kEstopActiveLevel;
-}
-
-static uint8_t inactiveSwitchLevel()
-{
-  return kEstopActiveLevel == LOW ? HIGH : LOW;
-}
-
-static void writeUint16BigEndian(uint8_t *destination, uint16_t value)
-{
-  destination[0] = static_cast<uint8_t>(value >> 8);
-  destination[1] = static_cast<uint8_t>(value);
-}
-
-static uint16_t readUint16BigEndian(const uint8_t *source)
-{
-  return (static_cast<uint16_t>(source[0]) << 8) |
-         static_cast<uint16_t>(source[1]);
-}
-
-static void writeUint32BigEndian(uint8_t *destination, uint32_t value)
-{
-  destination[0] = static_cast<uint8_t>(value >> 24);
-  destination[1] = static_cast<uint8_t>(value >> 16);
-  destination[2] = static_cast<uint8_t>(value >> 8);
-  destination[3] = static_cast<uint8_t>(value);
+  out[0] = static_cast<uint8_t>(value >> 24);
+  out[1] = static_cast<uint8_t>(value >> 16);
+  out[2] = static_cast<uint8_t>(value >> 8);
+  out[3] = static_cast<uint8_t>(value);
 }
 
 void switchEdgeIsr()
 {
-  switchRawLevel = static_cast<uint8_t>(digitalRead(kEstopSwitchPin));
-  switchRawEdgeUs = micros();
-  ++estopRawEdges;
-  switchRawChanged = true;
+  rawLevel = static_cast<uint8_t>(digitalRead(kLoadSwitchPin));
+  rawEdgeUs = micros();
+  ++rawEdges;
+  rawChanged = true;
 }
 
-void dumpTransmitComplete(const CAN_message_t &message)
+static void dumpTransmitComplete(const CAN_message_t &message)
 {
-  ++dumpTxSuccess;
-  if (message.mb == kDumpMailboxA) {
-    dumpTxCompletedMask |= 0x01;
-  } else if (message.mb == kDumpMailboxB) {
-    dumpTxCompletedMask |= 0x02;
+  const int index = message.mb == MB8 ? 0 : message.mb == MB9 ? 1 : -1;
+  if (index < 0) return;
+  const uint32_t now = micros();
+  const uint32_t cycle = mailboxCycle[index];
+  inFlight[index] = false;
+  ++txSuccess;
+  lastCompleteUs = now;
+  if (firstPending && cycle == loadCycle) {
+    firstPending = false;
+    firstReady = true;
+    firstCycle = cycle;
+    firstLatencyUs = now - lastOnUs;
   }
-}
-
-void estopTransmitComplete(const CAN_message_t &message)
-{
-  ++estopTxSuccess;
-  estopCompletedSequence = readUint16BigEndian(&message.buf[2]);
-  estopCompletedUs = micros();
-  estopTxCompleted = true;
-}
-
-static void enqueueEstopEvent(bool active, uint32_t rawUs,
-                              uint32_t debouncedUs)
-{
-  ++stats.estopDebouncedEvents;
-
-  if (estopQueueCount == kEstopQueueCapacity) {
-    ++stats.estopQueueOverflow;
-    ++stats.estopTxFailOrRetry;
-    return;
-  }
-
-  EstopEvent &event = estopQueue[estopQueueTail];
-  event = EstopEvent{};
-  event.active = active;
-  event.sequence = nextEstopSequence++;
-  event.rawUs = rawUs;
-  event.debouncedUs = debouncedUs;
-  event.nextSendUs = debouncedUs;
-  event.remaining = kEstopRepeatCount;
-
-  estopQueueTail = (estopQueueTail + 1) % kEstopQueueCapacity;
-  ++estopQueueCount;
-}
-
-static void processSwitch(uint32_t now)
-{
-  bool changed;
-  uint8_t rawLevel;
-  uint32_t rawEdgeUs;
-
-  noInterrupts();
-  changed = switchRawChanged;
-  rawLevel = switchRawLevel;
-  rawEdgeUs = switchRawEdgeUs;
-  switchRawChanged = false;
-  interrupts();
-
-  if (changed) {
-    switchCandidateLevel = rawLevel;
-    switchCandidateSinceUs = rawEdgeUs;
-  }
-
-  if (switchCandidateLevel != switchDebouncedLevel &&
-      static_cast<uint32_t>(now - switchCandidateSinceUs) >= kDebounceUs) {
-    switchDebouncedLevel = switchCandidateLevel;
-    enqueueEstopEvent(switchIsActive(switchDebouncedLevel),
-                      switchCandidateSinceUs, now);
-  }
-}
-
-static void fillEstopFrame(CAN_message_t &frame, const EstopEvent &event)
-{
-  frame = CAN_message_t{};
-  frame.id = estopId();
-  frame.len = 8;
-  frame.flags.extended = false;
-  frame.buf[0] = event.active ? 0x01 : 0x00;
-  frame.buf[1] = kPriorityInverted ? 0x01 : 0x00;
-  writeUint16BigEndian(&frame.buf[2], event.sequence);
-  writeUint32BigEndian(&frame.buf[4], event.debouncedUs);
-}
-
-static void consumeEstopCompletion()
-{
-  bool completed;
-  uint16_t sequence;
-  uint32_t completedUs;
-
-  noInterrupts();
-  completed = estopTxCompleted;
-  sequence = estopCompletedSequence;
-  completedUs = estopCompletedUs;
-  estopTxCompleted = false;
-  interrupts();
-
-  if (!completed || estopQueueCount == 0) {
-    return;
-  }
-
-  EstopEvent &event = estopQueue[estopQueueHead];
-  if (!event.inFlight || sequence != event.sequence) {
-    ++stats.estopTxFailOrRetry;
-    return;
-  }
-
-  event.inFlight = false;
-  if (!event.hasFirstTxTimestamp) {
-    event.firstTxUs = completedUs;
-    event.hasFirstTxTimestamp = true;
-  }
-
-  if (event.remaining > 0) {
-    --event.remaining;
-  }
-
-  if (event.remaining == 0) {
-    lastEstopTiming.valid = true;
-    lastEstopTiming.active = event.active;
-    lastEstopTiming.sequence = event.sequence;
-    lastEstopTiming.rawToDebouncedUs = event.debouncedUs - event.rawUs;
-    lastEstopTiming.requestToTxUs = event.firstTxUs - event.requestUs;
-
-    estopQueueHead = (estopQueueHead + 1) % kEstopQueueCapacity;
-    --estopQueueCount;
-  } else {
-    event.nextSendUs = completedUs + kEstopRepeatIntervalUs;
-  }
-}
-
-static void processEstopTransmit(uint32_t now)
-{
-  consumeEstopCompletion();
-
-  if (estopQueueCount == 0) {
-    return;
-  }
-
-  EstopEvent &event = estopQueue[estopQueueHead];
-  if (event.inFlight || !timeReached(now, event.nextSendUs)) {
-    return;
-  }
-
-  CAN_message_t frame;
-  fillEstopFrame(frame, event);
-  ++stats.estopTxRequests;
-
-  if (estopCan.write(kEstopMailbox, frame) == 1) {
-    event.inFlight = true;
-    if (!event.hasRequestTimestamp) {
-      event.requestUs = now;
-      event.hasRequestTimestamp = true;
-    }
-  } else {
-    ++stats.estopTxFailOrRetry;
-    event.nextSendUs = now + kEstopRepeatIntervalUs;
-  }
-}
-
-static bool generateLatestDump(uint32_t now)
-{
-  if (!kDumpEnabled || !timeReached(now, nextDumpGenerationUs)) {
-    return false;
-  }
-
-  const uint32_t elapsed = now - nextDumpGenerationUs;
-  const uint32_t generatedCount = elapsed / kDumpPeriodUs + 1;
-  nextDumpGenerationUs += generatedCount * kDumpPeriodUs;
-
-  stats.dumpGenerated += generatedCount;
-  if (generatedCount > 1) {
-    stats.dumpDropped += generatedCount - 1;
-  }
-  if (latestDumpPending) {
-    ++stats.dumpDropped;
-  }
-
-  dumpSequence += generatedCount;
-  latestDumpFrame = CAN_message_t{};
-  latestDumpFrame.id = dumpId();
-  latestDumpFrame.len = 8;
-  latestDumpFrame.flags.extended = false;
-  writeUint32BigEndian(&latestDumpFrame.buf[0], dumpSequence - 1);
-  writeUint32BigEndian(&latestDumpFrame.buf[4], now);
-  latestDumpPending = true;
-  return true;
-}
-
-static bool consumeDumpCompletions()
-{
-  uint8_t completedMask;
-  noInterrupts();
-  completedMask = dumpTxCompletedMask;
-  dumpTxCompletedMask = 0;
-  interrupts();
-
-  if (completedMask & 0x01) {
-    dumpMailboxAInFlight = false;
-  }
-  if (completedMask & 0x02) {
-    dumpMailboxBInFlight = false;
-  }
-  return completedMask != 0;
-}
-
-static void enqueueLatestDump()
-{
-  FLEXCAN_MAILBOX mailbox;
-  bool *inFlight;
-
-  if (!dumpMailboxAInFlight) {
-    mailbox = kDumpMailboxA;
-    inFlight = &dumpMailboxAInFlight;
-  } else if (!dumpMailboxBInFlight) {
-    mailbox = kDumpMailboxB;
-    inFlight = &dumpMailboxBInFlight;
-  } else {
-    ++stats.dumpMailboxBusy;
-    return;
-  }
-
-  if (dumpCan.write(mailbox, latestDumpFrame) == 1) {
-    *inFlight = true;
-    latestDumpPending = false;
-    ++stats.dumpEnqueued;
-  } else {
-    ++stats.dumpMailboxBusy;
-  }
-}
-
-static void processDump(uint32_t now)
-{
-  const bool generated = generateLatestDump(now);
-  const bool transmitCompleted = consumeDumpCompletions();
-
-  if (!latestDumpPending || (!generated && !transmitCompleted)) {
-    return;
-  }
-  enqueueLatestDump();
-}
-
-static void recordCanError(const CAN_error_t &error, bool &wasBusOff)
-{
-  const bool hasError = error.BIT1_ERR || error.BIT0_ERR ||
-                        error.ACK_ERR || error.CRC_ERR ||
-                        error.FRM_ERR || error.STF_ERR ||
-                        error.TX_WRN || error.RX_WRN;
-  if (hasError) {
-    ++stats.canErrorCount;
-  }
-
-  const bool isBusOff = strcmp(error.FLT_CONF, "Bus off") == 0;
-  if (isBusOff && !wasBusOff) {
-    ++stats.busOffCount;
-  }
-  wasBusOff = isBusOff;
-}
-
-static void collectCanErrors()
-{
-  CAN_error_t error;
-  while (dumpCan.error(error, false)) {
-    recordCanError(error, dumpBusOff);
-  }
-  while (estopCan.error(error, false)) {
-    recordCanError(error, estopBusOff);
-  }
-}
-
-static void printStatistics(uint32_t now)
-{
-  if (!timeReached(now, nextStatsUs)) {
-    return;
-  }
-  nextStatsUs += kStatsPeriodUs;
-
-  uint32_t rawEdges;
-  uint32_t dumpSuccess;
-  uint32_t estopSuccess;
-  noInterrupts();
-  rawEdges = estopRawEdges;
-  dumpSuccess = dumpTxSuccess;
-  estopSuccess = estopTxSuccess;
-  interrupts();
-
-  Serial.printf(
-      "STAT mode=%s uptime_us=%lu dump_generated=%lu dump_enqueued=%lu "
-      "dump_tx_success=%lu dump_dropped=%lu dump_mailbox_busy=%lu "
-      "dump_in_flight=%u "
-      "estop_raw_edges=%lu estop_debounced_events=%lu "
-      "estop_tx_requests=%lu estop_tx_success=%lu "
-      "estop_tx_fail_or_retry=%lu estop_queue=%u estop_queue_overflow=%lu "
-      "can_error_count=%lu bus_off_count=%lu\n",
-      kPriorityInverted ? "inverted" : "normal",
-      static_cast<unsigned long>(now),
-      static_cast<unsigned long>(stats.dumpGenerated),
-      static_cast<unsigned long>(stats.dumpEnqueued),
-      static_cast<unsigned long>(dumpSuccess),
-      static_cast<unsigned long>(stats.dumpDropped),
-      static_cast<unsigned long>(stats.dumpMailboxBusy),
-      static_cast<unsigned int>(dumpMailboxAInFlight) +
-          static_cast<unsigned int>(dumpMailboxBInFlight),
-      static_cast<unsigned long>(rawEdges),
-      static_cast<unsigned long>(stats.estopDebouncedEvents),
-      static_cast<unsigned long>(stats.estopTxRequests),
-      static_cast<unsigned long>(estopSuccess),
-      static_cast<unsigned long>(stats.estopTxFailOrRetry),
-      static_cast<unsigned int>(estopQueueCount),
-      static_cast<unsigned long>(stats.estopQueueOverflow),
-      static_cast<unsigned long>(stats.canErrorCount),
-      static_cast<unsigned long>(stats.busOffCount));
-
-  if (lastEstopTiming.valid) {
-    Serial.printf(
-        "LAT estop=%s seq=%u raw_to_debounced_us=%lu "
-        "request_to_first_tx_us=%lu\n",
-        lastEstopTiming.active ? "active" : "released",
-        static_cast<unsigned int>(lastEstopTiming.sequence),
-        static_cast<unsigned long>(lastEstopTiming.rawToDebouncedUs),
-        static_cast<unsigned long>(lastEstopTiming.requestToTxUs));
+  if (drainActive && cycle == drainCycle && drainRemaining > 0) {
+    --drainRemaining;
+    ++drainCompleted;
+    drainLastUs = now;
   }
 }
 
@@ -460,63 +111,285 @@ static void initializeCan()
   dumpCan.begin();
   dumpCan.setBaudRate(kCanBitrate);
   dumpCan.setMaxMB(16);
-  dumpCan.setMB(kDumpMailboxA, TX, STD);
-  dumpCan.setMB(kDumpMailboxB, TX, STD);
-  dumpCan.enableMBInterrupt(kDumpMailboxA);
-  dumpCan.enableMBInterrupt(kDumpMailboxB);
-  dumpCan.onTransmit(kDumpMailboxA, dumpTransmitComplete);
-  dumpCan.onTransmit(kDumpMailboxB, dumpTransmitComplete);
+  for (int index = 0; index < 2; ++index) {
+    dumpCan.setMB(kDumpMailbox[index], TX, STD);
+    dumpCan.enableMBInterrupt(kDumpMailbox[index]);
+    dumpCan.onTransmit(kDumpMailbox[index], dumpTransmitComplete);
+  }
+}
 
-  estopCan.begin();
-  estopCan.setBaudRate(kCanBitrate);
-  estopCan.setMaxMB(16);
-  estopCan.setMB(kEstopMailbox, TX, STD);
-  estopCan.enableMBInterrupt(kEstopMailbox);
-  estopCan.onTransmit(kEstopMailbox, estopTransmitComplete);
+static void processSwitch(uint32_t now)
+{
+  noInterrupts();
+  const bool changed = rawChanged;
+  const uint8_t level = rawLevel;
+  const uint32_t edgeUs = rawEdgeUs;
+  rawChanged = false;
+  interrupts();
+
+  if (changed) {
+    candidateLevel = level;
+    candidateSinceUs = edgeUs;
+    debouncePending = true;
+  }
+  if (!debouncePending ||
+      static_cast<uint32_t>(now - candidateSinceUs) < kDebounceUs) return;
+  debouncePending = false;
+  if (switchInitialized && candidateLevel == debouncedLevel) return;
+
+  const bool wasInitialized = switchInitialized;
+  switchInitialized = true;
+  debouncedLevel = candidateLevel;
+  if (wasInitialized) ++stats.debouncedEdges;
+
+  if (candidateLevel == kLoadActiveLevel) {
+    noInterrupts();
+    loadOn = true;
+    ++loadCycle;
+    lastOnUs = now;
+    firstPending = true;
+    firstReady = false;
+    interrupts();
+    latestPending = false;
+    nextGenerationUs = now;
+    Serial.printf("LOAD on cycle=%lu at_us=%lu\n",
+                  static_cast<unsigned long>(loadCycle),
+                  static_cast<unsigned long>(now));
+  } else if (wasInitialized) {
+    noInterrupts();
+    loadOn = false;
+    lastOffUs = now;
+    drainActive = true;
+    drainCycle = loadCycle;
+    drainOffUs = now;
+    drainLastUs = now;
+    drainInitial = static_cast<uint8_t>(inFlight[0]) +
+                   static_cast<uint8_t>(inFlight[1]);
+    drainRemaining = drainInitial;
+    drainCompleted = 0;
+    drainUnconfirmed = 0;
+    interrupts();
+    if (latestPending) ++stats.dropped;
+    latestPending = false;
+    Serial.printf("LOAD off cycle=%lu at_us=%lu pending_mb=%u\n",
+                  static_cast<unsigned long>(loadCycle),
+                  static_cast<unsigned long>(now),
+                  static_cast<unsigned int>(drainInitial));
+  } else {
+    Serial.printf("LOAD boot_off at_us=%lu\n",
+                  static_cast<unsigned long>(now));
+  }
+}
+
+static void collectCanErrors(uint32_t now)
+{
+  CAN_error_t error;
+  while (dumpCan.error(error, false)) {
+    if (error.BIT1_ERR || error.BIT0_ERR || error.ACK_ERR ||
+        error.CRC_ERR || error.FRM_ERR || error.STF_ERR ||
+        error.TX_WRN || error.RX_WRN) ++stats.canErrors;
+    const bool busOff = strcmp(error.FLT_CONF, "Bus off") == 0;
+    if (busOff && !wasBusOff) {
+      ++stats.busOff;
+      recoveryPending = true;
+      nextRecoveryUs = now + kCanRecoveryBackoffUs;
+    }
+    wasBusOff = busOff;
+  }
+}
+
+static void checkTransmitTimeout(uint32_t now)
+{
+  if (recoveryPending) return;
+  for (int index = 0; index < 2; ++index) {
+    if (inFlight[index] &&
+        static_cast<uint32_t>(now - requestUs[index]) >= kDumpTxTimeoutUs) {
+      ++stats.txTimeout;
+      recoveryPending = true;
+      nextRecoveryUs = now + kCanRecoveryBackoffUs;
+      return;
+    }
+  }
+}
+
+static void recoverCan(uint32_t now)
+{
+  if (!recoveryPending || !reached(now, nextRecoveryUs)) return;
+  // FlexCAN_T4::write(mb, frame) can use its internal TX queue when busy.
+  // There is no public API to discard that queue. Never reset with queued
+  // frames that could be transmitted after the switch has been released.
+  if (dumpCan.getTXQueueCount() != 0) {
+    nextRecoveryUs = now + kCanRecoveryBackoffUs;
+    return;
+  }
+  noInterrupts();
+  for (int index = 0; index < 2; ++index) {
+    if (!inFlight[index]) continue;
+    ++stats.txUnconfirmed;
+    if (drainActive && mailboxCycle[index] == drainCycle &&
+        drainRemaining > 0) {
+      --drainRemaining;
+      ++drainUnconfirmed;
+    }
+    inFlight[index] = false;
+  }
+  initializeCan();  // begin() resets the controller; restore baud and mailboxes.
+  interrupts();
+  if (latestPending) ++stats.dropped;
+  latestPending = false;
+  nextGenerationUs = now;
+  wasBusOff = false;
+  recoveryPending = false;
+  ++stats.recoveries;
+  Serial.printf("CAN_RECOVERY at_us=%lu unconfirmed_total=%lu\n",
+                static_cast<unsigned long>(now),
+                static_cast<unsigned long>(stats.txUnconfirmed));
+}
+
+static void generateLatestDump(uint32_t now)
+{
+  if (!loadOn || recoveryPending || !reached(now, nextGenerationUs)) return;
+  const uint32_t count = (now - nextGenerationUs) / kDumpPeriodUs + 1;
+  nextGenerationUs += count * kDumpPeriodUs;
+  stats.generated += count;
+  stats.dropped += count - 1;
+  if (latestPending) ++stats.dropped;
+  sequence += count;
+  latestFrame = CAN_message_t{};
+  latestFrame.id = kLoadCanId;
+  latestFrame.len = 8;
+  latestFrame.flags.extended = false;
+  writeBe32(&latestFrame.buf[0], sequence - 1);
+  writeBe32(&latestFrame.buf[4], now);
+  latestPending = true;
+}
+
+static void enqueueLatestDump(uint32_t now)
+{
+  if (!loadOn || recoveryPending || !latestPending) return;
+  const int index = !inFlight[0] ? 0 : !inFlight[1] ? 1 : -1;
+  if (index < 0) {
+    ++stats.mailboxBusy;
+    return;
+  }
+  noInterrupts();
+  // FlexCAN_T4::write() queues a frame if the requested hardware mailbox is
+  // busy. Check the installed library's mailbox code before calling it so an
+  // OFF transition cannot leave a hidden software-queued frame behind.
+  if (FLEXCAN_get_code(FLEXCANb_MBn_CS(CAN1, kDumpMailbox[index])) !=
+      FLEXCAN_MB_CODE_TX_INACTIVE) {
+    interrupts();
+    ++stats.mailboxBusy;
+    recoveryPending = true;
+    nextRecoveryUs = now + kCanRecoveryBackoffUs;
+    return;
+  }
+  inFlight[index] = true;
+  mailboxCycle[index] = loadCycle;
+  requestUs[index] = now;
+  const int accepted = dumpCan.write(kDumpMailbox[index], latestFrame);
+  if (accepted != 1) inFlight[index] = false;
+  interrupts();
+  if (accepted == 1) {
+    latestPending = false;
+    ++stats.enqueued;
+  } else {
+    ++stats.mailboxBusy;
+  }
+}
+
+static void printDrain()
+{
+  if (!drainActive || drainRemaining != 0) return;
+  const uint32_t latency = drainCompleted == 0 ? 0 :
+                           drainLastUs - drainOffUs;
+  Serial.printf(
+      "DRAIN cycle=%lu initial=%u completed=%u unconfirmed=%u "
+      "last_complete_us=%lu drain_us=%lu\n",
+      static_cast<unsigned long>(drainCycle),
+      static_cast<unsigned int>(drainInitial),
+      static_cast<unsigned int>(drainCompleted),
+      static_cast<unsigned int>(drainUnconfirmed),
+      static_cast<unsigned long>(drainCompleted == 0 ? 0 : drainLastUs),
+      static_cast<unsigned long>(latency));
+  drainActive = false;
+}
+
+static void printStatistics(uint32_t now)
+{
+  if (!reached(now, nextStatsUs)) return;
+  nextStatsUs += kStatsPeriodUs;
+  Serial.printf(
+      "STAT load_switch=%s raw_edges=%lu debounced_edges=%lu "
+      "last_on_us=%lu last_off_us=%lu dump_generated=%lu "
+      "dump_enqueued=%lu dump_tx_success=%lu dump_dropped=%lu "
+      "dump_mailbox_busy=%lu dump_in_flight=%u dump_tx_timeout=%lu "
+      "dump_tx_unconfirmed=%lu can_recoveries=%lu can_tx_queue=%lu "
+      "can_error_count=%lu bus_off_count=%lu last_tx_complete_us=%lu\n",
+      loadOn ? "on" : "off",
+      static_cast<unsigned long>(rawEdges),
+      static_cast<unsigned long>(stats.debouncedEdges),
+      static_cast<unsigned long>(lastOnUs),
+      static_cast<unsigned long>(lastOffUs),
+      static_cast<unsigned long>(stats.generated),
+      static_cast<unsigned long>(stats.enqueued),
+      static_cast<unsigned long>(txSuccess),
+      static_cast<unsigned long>(stats.dropped),
+      static_cast<unsigned long>(stats.mailboxBusy),
+      static_cast<unsigned int>(inFlight[0]) +
+          static_cast<unsigned int>(inFlight[1]),
+      static_cast<unsigned long>(stats.txTimeout),
+      static_cast<unsigned long>(stats.txUnconfirmed),
+      static_cast<unsigned long>(stats.recoveries),
+      static_cast<unsigned long>(dumpCan.getTXQueueCount()),
+      static_cast<unsigned long>(stats.canErrors),
+      static_cast<unsigned long>(stats.busOff),
+      static_cast<unsigned long>(lastCompleteUs));
 }
 
 void setup()
 {
   Serial.begin(115200);
-  while (!Serial && millis() < 3000) {
-  }
-
-  pinMode(kEstopSwitchPin, kEstopInputMode);
+  while (!Serial && millis() < 3000) {}
+  pinMode(kLoadSwitchPin, INPUT_PULLUP);
   const uint32_t now = micros();
-  const uint8_t initialLevel = static_cast<uint8_t>(digitalRead(kEstopSwitchPin));
-  switchRawLevel = initialLevel;
-  switchRawEdgeUs = now;
-  switchCandidateLevel = initialLevel;
-  switchCandidateSinceUs = now;
-  switchDebouncedLevel = inactiveSwitchLevel();
-
+  const uint8_t initialLevel = static_cast<uint8_t>(digitalRead(kLoadSwitchPin));
+  rawLevel = initialLevel;
+  rawEdgeUs = now;
+  candidateLevel = initialLevel;
+  candidateSinceUs = now;
   initializeCan();
-  attachInterrupt(digitalPinToInterrupt(kEstopSwitchPin), switchEdgeIsr, CHANGE);
-
-  nextDumpGenerationUs = now + kDumpPeriodUs;
+  attachInterrupt(digitalPinToInterrupt(kLoadSwitchPin), switchEdgeIsr, CHANGE);
   nextStatsUs = now + kStatsPeriodUs;
-
-  Serial.println("Teensy 4.1 CAN load/E-stop test started");
-  Serial.printf("mode=%s bitrate=%lu estop_id=0x%03lX dump_id=0x%03lX\n",
-                kPriorityInverted ? "inverted" : "normal",
+  Serial.println("Teensy 4.1 switch-gated CAN1 load test started");
+  Serial.printf("bitrate=%lu load_id=0x%03lX dump_period_us=%lu "
+                "switch_pin=%u active=LOW debounce_us=%lu\n",
                 static_cast<unsigned long>(kCanBitrate),
-                static_cast<unsigned long>(estopId()),
-                static_cast<unsigned long>(dumpId()));
-  Serial.printf(
-      "CAN1 dump TX=22 RX=23 mailboxes=8,9; CAN2 estop TX=1 RX=0\n");
-  Serial.printf("switch pin=%u active=%s debounce_us=%lu dump_period_us=%lu\n",
-                static_cast<unsigned int>(kEstopSwitchPin),
-                kEstopActiveLevel == LOW ? "LOW" : "HIGH",
-                static_cast<unsigned long>(kDebounceUs),
-                static_cast<unsigned long>(kDumpPeriodUs));
+                static_cast<unsigned long>(kLoadCanId),
+                static_cast<unsigned long>(kDumpPeriodUs),
+                static_cast<unsigned int>(kLoadSwitchPin),
+                static_cast<unsigned long>(kDebounceUs));
 }
 
 void loop()
 {
   const uint32_t now = micros();
   processSwitch(now);
-  processEstopTransmit(now);
-  processDump(now);
-  collectCanErrors();
+  collectCanErrors(now);
+  checkTransmitTimeout(now);
+  recoverCan(now);
+  generateLatestDump(now);
+  enqueueLatestDump(now);
+  printDrain();
+  if (firstReady) {
+    noInterrupts();
+    const uint32_t cycle = firstCycle;
+    const uint32_t latency = firstLatencyUs;
+    firstReady = false;
+    interrupts();
+    Serial.printf("FIRST_TX cycle=%lu on_to_complete_us=%lu\n",
+                  static_cast<unsigned long>(cycle),
+                  static_cast<unsigned long>(latency));
+  }
   printStatistics(now);
 }

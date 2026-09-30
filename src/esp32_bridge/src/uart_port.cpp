@@ -23,6 +23,8 @@ speed_t toTermiosBaudRate(const int baud_rate)
     case 57600: return B57600;
     case 115200: return B115200;
     case 230400: return B230400;
+    case 460800: return B460800;
+    case 921600: return B921600;
     default:
       throw std::invalid_argument("unsupported baud rate: " + std::to_string(baud_rate));
   }

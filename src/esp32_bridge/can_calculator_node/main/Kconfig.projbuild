@@ -1,0 +1,22 @@
+menu "CAN calculator node configuration"
+
+    config CAN_CALCULATOR_TX_GPIO
+        int "TWAI TX GPIO"
+        range 0 48
+        default 4
+        help
+            GPIO connected to the TXD input of the external CAN transceiver.
+
+    config CAN_CALCULATOR_RX_GPIO
+        int "TWAI RX GPIO"
+        range 0 48
+        default 5
+        help
+            GPIO connected to the RXD output of the external CAN transceiver.
+
+    config CAN_CALCULATOR_RX_QUEUE_DEPTH
+        int "Receive queue depth"
+        range 4 64
+        default 16
+
+endmenu

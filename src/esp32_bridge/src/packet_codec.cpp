@@ -1,150 +1,238 @@
 #include "esp32_bridge/packet_codec.hpp"
 
 #include <algorithm>
-#include <cstring>
+#include <array>
+#include <cmath>
+#include <limits>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 
 namespace esp32_bridge
 {
 namespace
 {
-constexpr std::uint8_t kMagicFirst = 0xAA;
-constexpr std::uint8_t kMagicSecond = 0x55;
-constexpr std::size_t kHeaderSize = 13;
-constexpr std::size_t kCrcSize = 2;
 
-void appendUint16(std::vector<std::uint8_t> & out, std::uint16_t value)
+template<typename IntegerT>
+bool appendFixed(
+  std::vector<std::uint8_t> & output, const double value, const double units_per_lsb)
 {
-  out.push_back(static_cast<std::uint8_t>(value >> 8));
-  out.push_back(static_cast<std::uint8_t>(value));
-}
-
-void appendUint32(std::vector<std::uint8_t> & out, std::uint32_t value)
-{
-  out.push_back(static_cast<std::uint8_t>(value >> 24));
-  out.push_back(static_cast<std::uint8_t>(value >> 16));
-  out.push_back(static_cast<std::uint8_t>(value >> 8));
-  out.push_back(static_cast<std::uint8_t>(value));
-}
-
-std::uint16_t readUint16(const std::uint8_t * data)
-{
-  return static_cast<std::uint16_t>(
-    (static_cast<std::uint16_t>(data[0]) << 8) | data[1]);
-}
-
-std::uint32_t readUint32(const std::uint8_t * data)
-{
-  return (static_cast<std::uint32_t>(data[0]) << 24) |
-         (static_cast<std::uint32_t>(data[1]) << 16) |
-         (static_cast<std::uint32_t>(data[2]) << 8) | data[3];
-}
-}  // namespace
-
-std::uint16_t crc16CcittFalse(const std::uint8_t * data, std::size_t size)
-{
-  std::uint16_t crc = 0xFFFF;
-  for (std::size_t i = 0; i < size; ++i) {
-    crc ^= static_cast<std::uint16_t>(data[i]) << 8;
-    for (int bit = 0; bit < 8; ++bit) {
-      crc = (crc & 0x8000U) != 0U ?
-        static_cast<std::uint16_t>((crc << 1) ^ 0x1021U) :
-        static_cast<std::uint16_t>(crc << 1);
-    }
-  }
-  return crc;
-}
-
-std::vector<std::uint8_t> encodePacket(const Packet & packet)
-{
-  if (packet.payload.size() > kMaximumPayloadSize) {
-    throw std::invalid_argument("packet payload exceeds 512 bytes");
-  }
-  std::vector<std::uint8_t> out;
-  out.reserve(kHeaderSize + packet.payload.size() + kCrcSize);
-  out.insert(out.end(), {kMagicFirst, kMagicSecond, kProtocolVersion,
-    static_cast<std::uint8_t>(packet.type), packet.flags});
-  appendUint16(out, packet.sequence);
-  appendUint16(out, static_cast<std::uint16_t>(packet.payload.size()));
-  appendUint32(out, packet.timestamp_us);
-  out.insert(out.end(), packet.payload.begin(), packet.payload.end());
-  appendUint16(out, crc16CcittFalse(out.data(), out.size()));
-  return out;
-}
-
-void appendFloat32BigEndian(std::vector<std::uint8_t> & out, float value)
-{
-  static_assert(sizeof(float) == sizeof(std::uint32_t));
-  std::uint32_t bits{};
-  std::memcpy(&bits, &value, sizeof(bits));
-  appendUint32(out, bits);
-}
-
-bool readFloat32BigEndian(
-  const std::vector<std::uint8_t> & input, std::size_t offset, float & value)
-{
-  if (offset + sizeof(std::uint32_t) > input.size()) {
+  if (!std::isfinite(value) || !std::isfinite(units_per_lsb) || units_per_lsb <= 0.0) {
     return false;
   }
-  const std::uint32_t bits = readUint32(input.data() + offset);
-  std::memcpy(&value, &bits, sizeof(value));
+
+  const double rounded = std::round(value / units_per_lsb);
+  const double saturated = std::clamp(
+    rounded,
+    static_cast<double>(std::numeric_limits<IntegerT>::lowest()),
+    static_cast<double>(std::numeric_limits<IntegerT>::max()));
+  using UnsignedT = std::make_unsigned_t<IntegerT>;
+  const auto encoded = static_cast<UnsignedT>(static_cast<IntegerT>(saturated));
+  for (std::size_t index = sizeof(IntegerT); index > 0; --index) {
+    output.push_back(static_cast<std::uint8_t>(encoded >> ((index - 1U) * 8U)));
+  }
   return true;
 }
 
-std::vector<Packet> PacketParser::feed(const std::uint8_t * data, std::size_t size)
+std::uint16_t readUint16(const std::vector<std::uint8_t> & input, const std::size_t offset)
 {
-  buffer_.insert(buffer_.end(), data, data + size);
-  std::vector<Packet> packets;
-  const std::array<std::uint8_t, 2> magic{kMagicFirst, kMagicSecond};
+  return static_cast<std::uint16_t>(
+    (static_cast<std::uint16_t>(input[offset]) << 8U) |
+    static_cast<std::uint16_t>(input[offset + 1U]));
+}
 
+std::int16_t readInt16(const std::vector<std::uint8_t> & input, const std::size_t offset)
+{
+  const auto raw = readUint16(input, offset);
+  const auto signed_value = raw <= 0x7FFFU ?
+    static_cast<std::int32_t>(raw) : static_cast<std::int32_t>(raw) - 0x10000;
+  return static_cast<std::int16_t>(signed_value);
+}
+
+bool isKnownMessageId(const std::uint8_t value)
+{
+  switch (static_cast<MessageId>(value)) {
+    case MessageId::kBlueRovOdometry:
+    case MessageId::kTorpedoOdometry:
+    case MessageId::kControlCommand:
+    case MessageId::kTorpedoActuator:
+    case MessageId::kControllerStatus:
+      return true;
+  }
+  return false;
+}
+
+}  // namespace
+
+std::size_t expectedPayloadSize(const MessageId message_id)
+{
+  switch (message_id) {
+    case MessageId::kBlueRovOdometry: return 32;
+    case MessageId::kTorpedoOdometry: return 32;
+    case MessageId::kControlCommand: return 8;
+    case MessageId::kTorpedoActuator: return 12;
+    case MessageId::kControllerStatus: return 8;
+  }
+  throw std::invalid_argument("unknown UART message ID");
+}
+
+std::vector<std::uint8_t> encodeFrame(
+  const MessageId message_id, const std::vector<std::uint8_t> & payload)
+{
+  if (payload.size() != expectedPayloadSize(message_id)) {
+    throw std::invalid_argument("payload size does not match UART message ID");
+  }
+
+  std::vector<std::uint8_t> frame;
+  frame.reserve(kFrameHeaderSize + payload.size());
+  frame.push_back(kSyncFirst);
+  frame.push_back(kSyncSecond);
+  frame.push_back(static_cast<std::uint8_t>(message_id));
+  frame.push_back(static_cast<std::uint8_t>(payload.size()));
+  frame.insert(frame.end(), payload.begin(), payload.end());
+  return frame;
+}
+
+bool appendFixedInt16(
+  std::vector<std::uint8_t> & output, const double value, const double units_per_lsb)
+{
+  return appendFixed<std::int16_t>(output, value, units_per_lsb);
+}
+
+bool appendFixedInt32(
+  std::vector<std::uint8_t> & output, const double value, const double units_per_lsb)
+{
+  return appendFixed<std::int32_t>(output, value, units_per_lsb);
+}
+
+bool appendFixedUint16(
+  std::vector<std::uint8_t> & output, const double value, const double units_per_lsb)
+{
+  return appendFixed<std::uint16_t>(output, value, units_per_lsb);
+}
+
+bool decodeTorpedoActuator(
+  const std::vector<std::uint8_t> & payload, TorpedoActuator & actuator)
+{
+  if (payload.size() != expectedPayloadSize(MessageId::kTorpedoActuator)) {
+    return false;
+  }
+  actuator.sequence = payload[0];
+  actuator.state = payload[1];
+  actuator.thrust = readUint16(payload, 2);
+  actuator.fin_top = static_cast<double>(readInt16(payload, 4)) * 0.001;
+  actuator.fin_bottom = static_cast<double>(readInt16(payload, 6)) * 0.001;
+  actuator.fin_left = static_cast<double>(readInt16(payload, 8)) * 0.001;
+  actuator.fin_right = static_cast<double>(readInt16(payload, 10)) * 0.001;
+  return actuator.state <= 4U && actuator.thrust <= 1000U &&
+         std::abs(actuator.fin_top) <= 0.5 && std::abs(actuator.fin_bottom) <= 0.5 &&
+         std::abs(actuator.fin_left) <= 0.5 && std::abs(actuator.fin_right) <= 0.5;
+}
+
+bool decodeControllerStatus(
+  const std::vector<std::uint8_t> & payload, ControllerStatus & status)
+{
+  if (payload.size() != expectedPayloadSize(MessageId::kControllerStatus)) {
+    return false;
+  }
+  status.version = payload[0];
+  status.heartbeat_sequence = payload[1];
+  status.state = payload[2];
+  status.mode = payload[3];
+  status.flags = payload[4];
+  status.last_error = payload[5];
+  status.uptime_seconds_low16 = readUint16(payload, 6);
+  return status.version == 1U && status.state <= 4U && status.mode <= 2U;
+}
+
+void UartFrameParser::checkTimeout(const std::uint64_t now_ms)
+{
+  if (frame_in_progress_ && now_ms - frame_start_ms_ >= kFrameTimeoutMs) {
+    buffer_.clear();
+    frame_in_progress_ = false;
+    ++timeout_count_;
+  }
+}
+
+std::vector<UartFrame> UartFrameParser::feed(
+  const std::uint8_t * data, const std::size_t size, const std::uint64_t now_ms)
+{
+  checkTimeout(now_ms);
+  if (data != nullptr && size > 0U) {
+    buffer_.insert(buffer_.end(), data, data + size);
+  }
+
+  std::vector<UartFrame> frames;
+  const std::array<std::uint8_t, 2> sync_bytes{kSyncFirst, kSyncSecond};
   while (true) {
-    const auto position = std::search(
-      buffer_.begin(), buffer_.end(), magic.begin(), magic.end());
-    if (position == buffer_.end()) {
-      if (!buffer_.empty() && buffer_.back() == kMagicFirst) {
-        buffer_.erase(buffer_.begin(), buffer_.end() - 1);
+    const auto sync = std::search(
+      buffer_.begin(), buffer_.end(), sync_bytes.begin(), sync_bytes.end());
+    if (sync == buffer_.end()) {
+      const bool keep_first_sync = !buffer_.empty() && buffer_.back() == kSyncFirst;
+      buffer_.clear();
+      if (keep_first_sync) {
+        buffer_.push_back(kSyncFirst);
+        frame_start_ms_ = now_ms;
+        frame_in_progress_ = true;
       } else {
-        buffer_.clear();
+        frame_in_progress_ = false;
       }
       break;
     }
-    buffer_.erase(buffer_.begin(), position);
-    if (buffer_.size() < kHeaderSize) {
-      break;
-    }
 
-    const std::uint16_t payload_size = readUint16(buffer_.data() + 7);
-    if (buffer_[2] != kProtocolVersion || payload_size > kMaximumPayloadSize) {
+    if (sync != buffer_.begin()) {
+      buffer_.erase(buffer_.begin(), sync);
       ++framing_error_count_;
-      buffer_.erase(buffer_.begin());
-      continue;
     }
-    const std::size_t packet_size = kHeaderSize + payload_size + kCrcSize;
-    if (buffer_.size() < packet_size) {
+    if (!frame_in_progress_) {
+      frame_start_ms_ = now_ms;
+      frame_in_progress_ = true;
+    }
+    if (buffer_.size() < kFrameHeaderSize) {
       break;
     }
-    const auto received_crc = readUint16(buffer_.data() + packet_size - kCrcSize);
-    const auto expected_crc = crc16CcittFalse(buffer_.data(), packet_size - kCrcSize);
-    if (received_crc != expected_crc) {
-      ++crc_error_count_;
+
+    const auto raw_id = buffer_[2];
+    if (!isKnownMessageId(raw_id)) {
       buffer_.erase(buffer_.begin());
+      frame_in_progress_ = false;
+      ++framing_error_count_;
+      continue;
+    }
+    const auto message_id = static_cast<MessageId>(raw_id);
+    const auto payload_size = static_cast<std::size_t>(buffer_[3]);
+    if (payload_size != expectedPayloadSize(message_id)) {
+      buffer_.erase(buffer_.begin());
+      frame_in_progress_ = false;
+      ++framing_error_count_;
       continue;
     }
 
-    Packet packet;
-    packet.type = static_cast<MessageType>(buffer_[3]);
-    packet.flags = buffer_[4];
-    packet.sequence = readUint16(buffer_.data() + 5);
-    packet.timestamp_us = readUint32(buffer_.data() + 9);
-    packet.payload.assign(buffer_.begin() + kHeaderSize,
-      buffer_.begin() + kHeaderSize + payload_size);
-    packets.push_back(std::move(packet));
-    buffer_.erase(buffer_.begin(), buffer_.begin() + packet_size);
+    const std::size_t frame_size = kFrameHeaderSize + payload_size;
+    if (buffer_.size() < frame_size) {
+      break;
+    }
+    UartFrame frame;
+    frame.message_id = message_id;
+    frame.payload.assign(
+      buffer_.begin() + static_cast<std::ptrdiff_t>(kFrameHeaderSize),
+      buffer_.begin() + static_cast<std::ptrdiff_t>(frame_size));
+    frames.push_back(std::move(frame));
+    buffer_.erase(
+      buffer_.begin(), buffer_.begin() + static_cast<std::ptrdiff_t>(frame_size));
+    frame_in_progress_ = false;
   }
-  return packets;
+  return frames;
 }
 
-std::uint64_t PacketParser::crcErrorCount() const {return crc_error_count_;}
-std::uint64_t PacketParser::framingErrorCount() const {return framing_error_count_;}
+std::uint64_t UartFrameParser::framingErrorCount() const
+{
+  return framing_error_count_;
+}
+
+std::uint64_t UartFrameParser::timeoutCount() const
+{
+  return timeout_count_;
+}
+
 }  // namespace esp32_bridge

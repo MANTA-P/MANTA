@@ -1,5 +1,8 @@
 # CAN 통신 규약 설계 가이드
 
+> 참고: 이 문서의 8장 PC-ESP32 패킷은 이전 설계 초안이다. 현재 PC→ESP32
+> UART 규약은 [`UART_TOPIC_PROTOCOL.md`](UART_TOPIC_PROTOCOL.md)를 기준으로 한다.
+
 ## 1. CAN ID와 데이터의 의미
 
 CAN 표준은 payload가 위치, 속도 또는 추진기 출력인지 정하지 않는다. CAN

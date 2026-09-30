@@ -116,9 +116,11 @@ SensorData RosInterface::latest_sensor_data() const
         target_odometry_age_us = target_odometry_timer_.tock();
     }
 
-    // Timeout values are in microseconds.
-    snapshot.torpedo_odometry.valid &= torpedo_odometry_age_us <= 30'000;
-    snapshot.target_odometry.valid &= target_odometry_age_us <= 30'000;
+    // Timeout values are in microseconds. The current HIL spec fixes odometry
+    // expiry at 50 ms, so stale samples are treated as invalid and trigger the
+    // safety logic instead of continuing with old data.
+    snapshot.torpedo_odometry.valid &= torpedo_odometry_age_us <= 50'000;
+    snapshot.target_odometry.valid &= target_odometry_age_us <= 50'000;
 
     return snapshot;
 }

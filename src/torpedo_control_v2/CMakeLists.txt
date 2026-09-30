@@ -42,6 +42,26 @@ ament_target_dependencies(torpedo_control_node_v2
   tf2_ros
 )
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_control_core
+    test/test_control_core.cpp
+    src/control_core.cpp
+    src/actuator_mixer.cpp
+    src/default_control_config.cpp
+    src/roll_controller.cpp
+    src/util/vector3.cpp
+  )
+  target_include_directories(test_control_core PRIVATE include)
+  ament_target_dependencies(test_control_core
+    nav_msgs
+    geometry_msgs
+    rclcpp
+    std_msgs
+    tf2_ros
+  )
+endif()
+
 install(TARGETS torpedo_control_node_v2
   DESTINATION lib/${PROJECT_NAME}
 )

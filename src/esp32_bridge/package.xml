@@ -3,18 +3,17 @@
 <package format="3">
   <name>esp32_bridge</name>
   <version>0.1.0</version>
-  <description>Bridge BlueROV SITL ROS data and ESP32 HIL control over USB CDC.</description>
+  <description>Bridge Torpedo HIL state and actuator data over ESP32 USB serial.</description>
 
   <maintainer email="user@todo.todo">user</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   <depend>rclcpp</depend>
-  <depend>std_msgs</depend>
-  <depend>sensor_msgs</depend>
   <depend>nav_msgs</depend>
-  <depend>geometry_msgs</depend>
-  <depend>dave_interfaces</depend>
+  <depend>std_msgs</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

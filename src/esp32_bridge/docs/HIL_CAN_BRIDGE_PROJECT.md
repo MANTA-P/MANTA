@@ -1,5 +1,9 @@
 # BlueROV HIL CAN 브리지 및 버스 부하 실험
 
+> 참고: PC→ESP32 UART 송신부는 단순화되었다. 현재 wire format과 구현 순서는
+> [`UART_TOPIC_PROTOCOL.md`](UART_TOPIC_PROTOCOL.md)와
+> [`../UART_TO_CAN_PLAN.md`](../UART_TO_CAN_PLAN.md)를 기준으로 한다.
+
 ## 1. 문서 목적
 
 이 문서는 MANTA 프로젝트에서 담당하는 **BlueROV 제어 로직의 HIL 전환**,
